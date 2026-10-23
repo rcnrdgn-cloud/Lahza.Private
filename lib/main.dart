@@ -486,9 +486,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
           uvSatir: img.planes[1].bytesPerRow,
           uvAdim: img.planes[1].bytesPerPixel ?? 1,
           puan: tr,
-          album: (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
-              ? 'Lahza - $_baskin'
-              : 'Lahza',
+          kategori: (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
+              ? _baskin
+              : null,
         ));
         if (_tampon.length > tamponBoyu) _tampon.removeAt(0);
       }
@@ -533,7 +533,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       if (mounted) setState(() => _flas = false);
     });
     try {
-      final jpeg = await compute(kareyiJpegYap, {
+      final sonuc = await compute(kareyiJpegYap, {
         'y': enIyi.y,
         'u': enIyi.u,
         'v': enIyi.v,
@@ -543,11 +543,17 @@ class _KameraEkraniState extends State<KameraEkrani> {
         'uvSatir': enIyi.uvSatir,
         'uvAdim': enIyi.uvAdim,
         'donus': kameralar[_kameraIndex].sensorOrientation,
+        'kategori': enIyi.kategori,
       });
+      final jpeg = sonuc[0];
       if (!await Gal.hasAccess()) {
         await Gal.requestAccess();
       }
-      await Gal.putImageBytes(jpeg, album: enIyi.album);
+      // Orijinal her zaman 'Lahza' albümüne, efektli kopya kategori albümüne
+      await Gal.putImageBytes(jpeg, album: 'Lahza');
+      if (sonuc.length > 1 && enIyi.kategori != null) {
+        await Gal.putImageBytes(sonuc[1], album: 'Lahza - ${enIyi.kategori}');
+      }
       final dosya = File(
           '${Directory.systemTemp.path}/lahza_${DateTime.now().millisecondsSinceEpoch}.jpg');
       await dosya.writeAsBytes(jpeg);
@@ -563,9 +569,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
     final kontrol = _kontrol;
     if (_cekiliyor || kontrol == null) return;
     _cekiliyor = true;
-    final albumAdi = (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
-        ? 'Lahza - $_baskin'
-        : 'Lahza';
+    final kategori = (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
+        ? _baskin
+        : null;
     try {
       await kontrol.stopImageStream();
       final foto = await kontrol.takePicture();
@@ -582,7 +588,14 @@ class _KameraEkraniState extends State<KameraEkrani> {
         if (!await Gal.hasAccess()) {
           await Gal.requestAccess();
         }
-        await Gal.putImage(foto.path, album: albumAdi);
+        await Gal.putImage(foto.path, album: 'Lahza');
+        if (kategori != null) {
+          final efektli = await compute(
+              dosyayaEfektUygula, {'yol': foto.path, 'kategori': kategori});
+          if (efektli != null) {
+            await Gal.putImageBytes(efektli, album: 'Lahza - $kategori');
+          }
+        }
       } catch (_) {}
       _oncekiKare = null;
       await kontrol.startImageStream(_analiz);
@@ -912,7 +925,7 @@ class _Kare {
   final int uvSatir;
   final int uvAdim;
   final int puan;
-  final String album;
+  final String? kategori;
   _Kare({
     required this.y,
     required this.u,
@@ -923,12 +936,12 @@ class _Kare {
     required this.uvSatir,
     required this.uvAdim,
     required this.puan,
-    required this.album,
+    required this.kategori,
   });
 }
 
 // YUV420 kareyi döndürülmüş JPEG'e çevirir (arka planda, ayrı iş parçacığında çalışır).
-Uint8List kareyiJpegYap(Map<String, dynamic> v) {
+List<Uint8List> kareyiJpegYap(Map<String, dynamic> v) {
   final Uint8List yb = v['y'];
   final Uint8List ub = v['u'];
   final Uint8List vb = v['v'];
@@ -938,6 +951,7 @@ Uint8List kareyiJpegYap(Map<String, dynamic> v) {
   final int uvSatir = v['uvSatir'];
   final int uvAdim = v['uvAdim'];
   final int donus = v['donus'];
+  final String? kategori = v['kategori'];
   final im = imglib.Image(width: w, height: h);
   for (int y = 0; y < h; y++) {
     final yo = y * ySatir;
@@ -957,5 +971,49 @@ Uint8List kareyiJpegYap(Map<String, dynamic> v) {
     }
   }
   final sonuc = donus == 0 ? im : imglib.copyRotate(im, angle: donus);
-  return Uint8List.fromList(imglib.encodeJpg(sonuc, quality: 92));
+  final orijinal = Uint8List.fromList(imglib.encodeJpg(sonuc, quality: 92));
+  if (kategori == null) return [orijinal];
+  final efektli = efektUygula(sonuc, kategori);
+  return [orijinal, Uint8List.fromList(imglib.encodeJpg(efektli, quality: 92))];
+}
+
+// Tam çözünürlüklü bir fotoğraf dosyasına kategori efektini uygular.
+Uint8List? dosyayaEfektUygula(Map<String, dynamic> v) {
+  final String yol = v['yol'];
+  final String kategori = v['kategori'];
+  final veri = File(yol).readAsBytesSync();
+  final im = imglib.decodeJpg(veri);
+  if (im == null) return null;
+  final duz = imglib.bakeOrientation(im);
+  final efektli = efektUygula(duz, kategori);
+  return Uint8List.fromList(imglib.encodeJpg(efektli, quality: 92));
+}
+
+// Her ruh haline uygun görünüm. (Görüntüyü yerinde değiştirir.)
+imglib.Image efektUygula(imglib.Image im, String kategori) {
+  switch (kategori) {
+    case 'Karizmatik':
+      // Siyah-beyaz, yüksek kontrast, kenarları karartılmış
+      imglib.grayscale(im);
+      imglib.adjustColor(im, contrast: 1.35, gamma: 0.95);
+      imglib.vignette(im, start: 0.35, end: 0.95, amount: 0.7);
+      return im;
+    case 'Eğlenceli':
+      // Canlı ve sıcak renkler
+      imglib.adjustColor(im, saturation: 1.3, contrast: 1.1, brightness: 1.05);
+      imglib.colorOffset(im, red: 8, blue: -6);
+      return im;
+    case 'Düşünceli':
+      // Soluk, serin tonlar, yumuşak kenar karartma
+      imglib.adjustColor(im, saturation: 0.55, contrast: 0.92, brightness: 0.97);
+      imglib.colorOffset(im, red: -6, blue: 8);
+      imglib.vignette(im, start: 0.4, end: 1.0, amount: 0.5);
+      return im;
+    case 'Samimi':
+      // Sıcak, yumuşak, hafif pembe-altın tonlar
+      imglib.adjustColor(im, saturation: 1.1, contrast: 0.95, brightness: 1.06);
+      imglib.colorOffset(im, red: 12, green: 4, blue: -8);
+      return im;
+  }
+  return im;
 }
