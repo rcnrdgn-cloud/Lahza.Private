@@ -357,4 +357,128 @@ class _KameraEkraniState extends State<KameraEkrani> {
       return Scaffold(body: Center(child: Text(_hata!)));
     }
     final kontrol = _kontrol;
-   
+    if (kontrol == null || !kontrol.value.isInitialized) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+    final yuzRozeti = !_yuzDestekli
+        ? _griRozet('Yüz analizi yok')
+        : (_yuzSayisi > 0
+            ? _rozet(_gozKapali ? 'Göz kapalı' : 'Yüz $_yuzSayisi',
+                _yuzPuani ?? 0)
+            : _griRozet('Yüz yok'));
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Center(child: CameraPreview(kontrol)),
+            Positioned(
+              top: 10,
+              left: 8,
+              right: 8,
+              child: Column(
+                children: [
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      _rozet('Işık', _isikPuani),
+                      _rozet('Netlik', _netlikPuani),
+                      _rozet('Sabitlik', _sabitlikPuani),
+                      yuzRozeti,
+                      _rozet('Toplam', _toplamPuan),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            if (_sonFoto != null)
+              Positioned(
+                left: 16,
+                bottom: 32,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(File(_sonFoto!),
+                      width: 70, height: 70, fit: BoxFit.cover),
+                ),
+              ),
+            Positioned(
+              right: 20,
+              bottom: 36,
+              child: _yuvarlakDugme(
+                renk: _otomatik ? Colors.green : Colors.black54,
+                onTap: () => setState(() {
+                  _otomatik = !_otomatik;
+                  _iyiSayac = 0;
+                }),
+                icerik: Text(
+                  _otomatik ? 'OTO\nAÇIK' : 'OTO\nKAPALI',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+            if (kameralar.length > 1)
+              Positioned(
+                right: 20,
+                bottom: 112,
+                child: _yuvarlakDugme(
+                  onTap: _kameraDegistir,
+                  icerik: const Icon(Icons.cameraswitch,
+                      color: Colors.white, size: 28),
+                ),
+              ),
+            Positioned(
+              bottom: 110,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Text(
+                  'Çekilen: $_cekimSayisi',
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ),
+            if (_flas)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(color: Colors.white70),
+                ),
+              ),
+            Positioned(
+              bottom: 24,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: GestureDetector(
+                  onTap: _cek,
+                  child: Container(
+                    width: 76,
+                    height: 76,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white,
+                      border: Border.all(color: Colors.grey, width: 4),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
