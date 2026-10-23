@@ -14,13 +14,18 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+      - name: Sabit imza anahtarini yerlestir
+        run: |
+          mkdir -p ~/.android
+          cp debug.keystore ~/.android/debug.keystore
       - name: Projeyi olustur ve derle
         run: |
           flutter create --org com.lahza --project-name lahza app
           cp lib/main.dart app/lib/main.dart
           cd app
           flutter pub add camera
-          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <application|' android/app/src/main/AndroidManifest.xml
+          flutter pub add gal
+          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="lahza"|android:label="Lahzâ"|' android/app/src/main/AndroidManifest.xml
           flutter build apk --release
       - uses: actions/upload-artifact@v4
