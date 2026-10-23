@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 late List<CameraDescription> kameralar;
 
@@ -56,6 +58,25 @@ class _KameraEkraniState extends State<KameraEkrani> {
   bool _gozKapali = false;
   String _yuzHata = '';
 
+  // An / ruh hali okuma
+  Map<String, int> _kategoriler = {};
+  String? _baskin;
+  int _baskinPuan = 0;
+  String _hamYuz = '';
+  bool _kollarYukari = false;
+
+  // Poz (iskelet) analizi ve el kaldırma jesti
+  final PoseDetector _pozDedektoru = PoseDetector(
+    options: PoseDetectorOptions(mode: PoseDetectionMode.stream),
+  );
+  bool _pozIsleniyor = false;
+  Pose? _poz;
+  Size _resimBoyutu = Size.zero;
+  bool _iskeletGoster = false; // iskelet + el jesti modu
+  int _elSayac = 0;
+  int _geriSayim = 0;
+  Timer? _geriSayimZamanlayici;
+
   // Otomatik çekim
   static const int esik = 80;
   static const int gerekenArdisik = 3;
@@ -86,6 +107,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       _oncekiKare = null;
       _yuzSayisi = 0;
       _yuzPuani = null;
+      _poz = null;
       await kontrol.startImageStream(_analiz);
       setState(() {});
     } catch (e) {
@@ -110,6 +132,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
   void dispose() {
     _kontrol?.dispose();
     _yuzDedektoru.close();
+    _pozDedektoru.close();
+    _geriSayimZamanlayici?.cancel();
     super.dispose();
   }
 
@@ -164,26 +188,94 @@ class _KameraEkraniState extends State<KameraEkrani> {
     }
     _yuzIsleniyor = true;
     try {
-      final yuzler = await _yuzDedektoru.processImage(girdi);
+      final yuzler = List<Face>.from(await _yuzDedektoru.processImage(girdi));
+      // En büyük (kameraya en yakın) yüzler önce
+      yuzler.sort((x, y) => y.boundingBox.width.compareTo(x.boundingBox.width));
+
       int? enDusuk;
       bool kapali = false;
+      int gulenSayisi = 0;
       for (final y in yuzler) {
         final sol = y.leftEyeOpenProbability ?? 0.5;
         final sag = y.rightEyeOpenProbability ?? 0.5;
         final goz = sol < sag ? sol : sag;
         final gulus = y.smilingProbability ?? 0.5;
         if (goz < 0.4) kapali = true;
+        if (gulus > 0.6) gulenSayisi++;
         final p = (goz * 60 + gulus * 40).round();
         if (enDusuk == null || p < enDusuk) enDusuk = p;
       }
+
+      double kirp(double v) => v < 0 ? 0.0 : (v > 1 ? 1.0 : v);
+      final kat = <String, int>{};
+      String ham = '';
+      if (yuzler.isNotEmpty) {
+        final a = yuzler.first;
+        final s = a.smilingProbability ?? 0.0;
+        final gl = a.leftEyeOpenProbability ?? 0.5;
+        final gr = a.rightEyeOpenProbability ?? 0.5;
+        final g = gl < gr ? gl : gr;
+        final yaw = (a.headEulerAngleY ?? 0).abs(); // sağa-sola dönüş
+        final egim = a.headEulerAngleX ?? 0; // + yukarı, - aşağı
+        final sabit = _sabitlikPuani / 100.0;
+
+        // Eğlenceli: gülüş, kollar havada, birden fazla gülen kişi
+        double e = s * 0.75 +
+            (_kollarYukari ? 0.2 : 0) +
+            (gulenSayisi >= 2 ? 0.15 : 0);
+        if (g < 0.3) e *= 0.7;
+        kat['Eğlenceli'] = (kirp(e) * 100).round();
+
+        // Karizmatik: kameraya değil yana bakış (~30°), sakin ifade, hareketsiz
+        final bakis = kirp(1 - (yaw - 30).abs() / 25);
+        double k = bakis * 0.45 + kirp(1 - s * 1.5) * 0.25 + sabit * 0.3;
+        if (g < 0.4) k *= 0.5;
+        kat['Karizmatik'] = (kirp(k) * 100).round();
+
+        // Düşünceli / hüzünlü: baş öne eğik, gülüş yok, hareketsiz
+        final egik = kirp((-egim - 5) / 20);
+        final d = egik * 0.5 + kirp(1 - s * 2) * 0.3 + sabit * 0.2;
+        kat['Düşünceli'] = (kirp(d) * 100).round();
+
+        // Samimi: iki yüz birbirine yakın, gülümsüyor, birbirine dönük
+        if (yuzler.length >= 2) {
+          final b2 = yuzler[1];
+          final r1 = a.boundingBox;
+          final r2 = b2.boundingBox;
+          final mesafe =
+              (r1.center - r2.center).distance / ((r1.width + r2.width) / 2);
+          final yakin = kirp((3.0 - mesafe) / 2.0);
+          final s2 = b2.smilingProbability ?? 0.0;
+          final donuk =
+              ((b2.headEulerAngleY ?? 0).abs() > 15 && yaw > 15) ? 1.0 : 0.0;
+          final sm = yakin * 0.5 + ((s + s2) / 2) * 0.3 + donuk * 0.2;
+          kat['Samimi'] = (kirp(sm) * 100).round();
+        }
+
+        ham = 'dönüş ${yaw.toStringAsFixed(0)}° · eğim ${egim.toStringAsFixed(0)}° · gülüş ${(s * 100).round()} · göz ${(g * 100).round()}';
+      }
+
+      String? baskin;
+      int baskinPuan = 0;
+      for (final g in kat.entries) {
+        if (g.value > baskinPuan) {
+          baskin = g.key;
+          baskinPuan = g.value;
+        }
+      }
+
       if (mounted) {
         setState(() {
           _yuzSayisi = yuzler.length;
           _yuzPuani = enDusuk;
           _gozKapali = kapali;
+          _kategoriler = kat;
+          _baskin = baskin;
+          _baskinPuan = baskinPuan;
+          _hamYuz = ham;
+          if (_yuzHata.startsWith('PlatformException')) _yuzHata = '';
         });
       }
-      if (_yuzHata.isNotEmpty && mounted) setState(() => _yuzHata = '');
     } catch (e) {
       if (mounted) setState(() => _yuzHata = e.toString());
     } finally {
@@ -191,11 +283,106 @@ class _KameraEkraniState extends State<KameraEkrani> {
     }
   }
 
-  // Her 5 karede bir ışık, netlik ve sabitlik ölçer; 10 karede bir yüz arar.
+  Future<void> _pozAnaliz(CameraImage img) async {
+    final girdi = _girdiOlustur(img);
+    if (girdi == null) return;
+    _pozIsleniyor = true;
+    try {
+      final pozlar = await _pozDedektoru.processImage(girdi);
+      final poz = pozlar.isNotEmpty ? pozlar.first : null;
+      final dikey = kameralar[_kameraIndex].sensorOrientation % 180 != 0;
+      final boyut = dikey
+          ? Size(img.height.toDouble(), img.width.toDouble())
+          : Size(img.width.toDouble(), img.height.toDouble());
+
+      // El kaldırma jesti: bilek burnun üstündeyse
+      bool elYukarida = false;
+      if (poz != null) {
+        final burun = poz.landmarks[PoseLandmarkType.nose];
+        for (final t in [
+          PoseLandmarkType.leftWrist,
+          PoseLandmarkType.rightWrist
+        ]) {
+          final bilek = poz.landmarks[t];
+          if (burun != null &&
+              bilek != null &&
+              burun.likelihood > 0.5 &&
+              bilek.likelihood > 0.5 &&
+              bilek.y < burun.y) {
+            elYukarida = true;
+          }
+        }
+      }
+      // Kollar havada mı? (bilek aynı taraftaki omzun üstünde)
+      bool kollar = false;
+      if (poz != null) {
+        for (final c in [
+          [PoseLandmarkType.leftWrist, PoseLandmarkType.leftShoulder],
+          [PoseLandmarkType.rightWrist, PoseLandmarkType.rightShoulder],
+        ]) {
+          final bilek = poz.landmarks[c[0]];
+          final omuz = poz.landmarks[c[1]];
+          if (bilek != null &&
+              omuz != null &&
+              bilek.likelihood > 0.5 &&
+              omuz.likelihood > 0.5 &&
+              bilek.y < omuz.y) {
+            kollar = true;
+          }
+        }
+      }
+      _kollarYukari = kollar;
+
+      if (elYukarida && _iskeletGoster) {
+        _elSayac++;
+      } else {
+        _elSayac = 0;
+      }
+      if (_elSayac >= 2 && _geriSayim == 0 && !_cekiliyor) {
+        _elSayac = 0;
+        _geriSayimBaslat();
+      }
+      if (mounted) {
+        setState(() {
+          _poz = poz;
+          _resimBoyutu = boyut;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _yuzHata = 'poz: $e');
+    } finally {
+      _pozIsleniyor = false;
+    }
+  }
+
+  void _geriSayimBaslat() {
+    if (!mounted) return;
+    setState(() => _geriSayim = 3);
+    _geriSayimZamanlayici?.cancel();
+    _geriSayimZamanlayici =
+        Timer.periodic(const Duration(seconds: 1), (zamanlayici) {
+      if (!mounted) {
+        zamanlayici.cancel();
+        return;
+      }
+      if (_geriSayim <= 1) {
+        zamanlayici.cancel();
+        setState(() => _geriSayim = 0);
+        _cek();
+      } else {
+        setState(() => _geriSayim--);
+      }
+    });
+  }
+
+  // Her 5 karede bir ışık, netlik ve sabitlik ölçer; 10 karede bir yüz ve poz arar.
   void _analiz(CameraImage img) {
     _kareSayaci++;
     if (_kareSayaci % 10 == 0 && !_yuzIsleniyor) {
       _yuzAnaliz(img);
+    }
+    if (_kareSayaci % 10 == 5 && !_pozIsleniyor) {
+      _pozAnaliz(img);
     }
     if (_isleniyor || _kareSayaci % 5 != 0) return;
     _isleniyor = true;
@@ -259,10 +446,10 @@ class _KameraEkraniState extends State<KameraEkrani> {
       if (sabit < 50) t = t * 0.5;
 
       // Kadrajda insan varsa yüz puanı da hesaba katılır
-      final yp = _yuzPuani;
-      if (_yuzSayisi > 0 && yp != null) {
-        t = t * 0.6 + yp * 0.4;
-        if (_gozKapali && t > 50) t = 50.0;
+      // Kadrajda insan varsa anın gücü (en baskın ruh hali) hesaba katılır
+      if (_yuzSayisi > 0 && _baskin != null) {
+        t = t * 0.5 + _baskinPuan * 0.5;
+        if (_gozKapali && _baskin != 'Düşünceli' && t > 50) t = 50.0;
       }
 
       if (mounted) {
@@ -278,7 +465,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       }
 
       // Otomatik çekim kararı
-      if (_otomatik && !_cekiliyor) {
+      if (_otomatik && !_cekiliyor && _geriSayim == 0) {
         if (t.round() >= esik) {
           _iyiSayac++;
         } else {
@@ -299,6 +486,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
     final kontrol = _kontrol;
     if (_cekiliyor || kontrol == null) return;
     _cekiliyor = true;
+    final albumAdi = (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
+        ? 'Lahza - $_baskin'
+        : 'Lahza';
     try {
       await kontrol.stopImageStream();
       final foto = await kontrol.takePicture();
@@ -315,7 +505,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
         if (!await Gal.hasAccess()) {
           await Gal.requestAccess();
         }
-        await Gal.putImage(foto.path, album: 'Lahza');
+        await Gal.putImage(foto.path, album: albumAdi);
       } catch (_) {}
       _oncekiKare = null;
       await kontrol.startImageStream(_analiz);
@@ -389,18 +579,40 @@ class _KameraEkraniState extends State<KameraEkrani> {
         body: Center(child: CircularProgressIndicator()),
       );
     }
-    final yuzRozeti = !_yuzDestekli
-        ? _griRozet('Yüz analizi yok')
-        : (_yuzSayisi > 0
-            ? _rozet(_gozKapali ? 'Göz kapalı' : 'Yüz $_yuzSayisi',
-                _yuzPuani ?? 0)
-            : _griRozet('Yüz yok'));
+    final Widget yuzRozeti;
+    if (!_yuzDestekli) {
+      yuzRozeti = _griRozet('Yüz analizi yok');
+    } else if (_yuzSayisi == 0) {
+      yuzRozeti = _griRozet('Yüz yok');
+    } else if (_gozKapali && _baskin != 'Düşünceli') {
+      yuzRozeti = _rozet('Göz kapalı', 0);
+    } else {
+      yuzRozeti = _rozet(_baskin ?? 'Yüz $_yuzSayisi', _baskinPuan);
+    }
+    String kisalt(String ad) => ad.substring(0, 1);
+    final katSatiri = _kategoriler.entries
+        .map((e) => '${kisalt(e.key)} ${e.value}')
+        .join(' · ');
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Stack(
           children: [
-            Center(child: CameraPreview(kontrol)),
+            Center(
+              child: CameraPreview(
+                kontrol,
+                child: (_iskeletGoster && _poz != null)
+                    ? CustomPaint(
+                        painter: IskeletCizer(
+                          _poz!,
+                          _resimBoyutu,
+                          kameralar[_kameraIndex].lensDirection ==
+                              CameraLensDirection.front,
+                        ),
+                      )
+                    : null,
+              ),
+            ),
             Positioned(
               top: 10,
               left: 8,
@@ -424,6 +636,12 @@ class _KameraEkraniState extends State<KameraEkrani> {
                     'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
                     style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
+                  if (_yuzSayisi > 0)
+                    Text(
+                      '$_hamYuz\n$katSatiri',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
                   if (_yuzHata.isNotEmpty)
                     Text(
                       'yüz hatası: $_yuzHata',
@@ -473,16 +691,45 @@ class _KameraEkraniState extends State<KameraEkrani> {
                 ),
               ),
             Positioned(
+              right: 20,
+              bottom: 188,
+              child: _yuvarlakDugme(
+                renk: _iskeletGoster ? Colors.green : Colors.black54,
+                onTap: () => setState(() => _iskeletGoster = !_iskeletGoster),
+                icerik: const Icon(Icons.accessibility_new,
+                    color: Colors.white, size: 28),
+              ),
+            ),
+            Positioned(
               bottom: 110,
               left: 0,
               right: 0,
-              child: Center(
-                child: Text(
-                  'Çekilen: $_cekimSayisi',
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                ),
+              child: Column(
+                children: [
+                  Text(
+                    'Çekilen: $_cekimSayisi',
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                  if (_iskeletGoster)
+                    const Text(
+                      'Poz modu: elini başının üstüne kaldır, 3 sn sonra çeker',
+                      style: TextStyle(color: Colors.white70, fontSize: 11),
+                    ),
+                ],
               ),
             ),
+            if (_geriSayim > 0)
+              Center(
+                child: Text(
+                  '$_geriSayim',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 120,
+                    fontWeight: FontWeight.bold,
+                    shadows: [Shadow(blurRadius: 12, color: Colors.black)],
+                  ),
+                ),
+              ),
             if (_flas)
               Positioned.fill(
                 child: IgnorePointer(
@@ -513,4 +760,58 @@ class _KameraEkraniState extends State<KameraEkrani> {
       ),
     );
   }
+}
+
+// Vücut iskeletini kamera görüntüsünün üzerine çizer.
+class IskeletCizer extends CustomPainter {
+  final Pose poz;
+  final Size resim;
+  final bool ayna;
+  IskeletCizer(this.poz, this.resim, this.ayna);
+
+  static const List<List<PoseLandmarkType>> baglar = [
+    [PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder],
+    [PoseLandmarkType.leftShoulder, PoseLandmarkType.leftElbow],
+    [PoseLandmarkType.leftElbow, PoseLandmarkType.leftWrist],
+    [PoseLandmarkType.rightShoulder, PoseLandmarkType.rightElbow],
+    [PoseLandmarkType.rightElbow, PoseLandmarkType.rightWrist],
+    [PoseLandmarkType.leftShoulder, PoseLandmarkType.leftHip],
+    [PoseLandmarkType.rightShoulder, PoseLandmarkType.rightHip],
+    [PoseLandmarkType.leftHip, PoseLandmarkType.rightHip],
+    [PoseLandmarkType.leftHip, PoseLandmarkType.leftKnee],
+    [PoseLandmarkType.leftKnee, PoseLandmarkType.leftAnkle],
+    [PoseLandmarkType.rightHip, PoseLandmarkType.rightKnee],
+    [PoseLandmarkType.rightKnee, PoseLandmarkType.rightAnkle],
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (resim.width == 0 || resim.height == 0) return;
+    final sx = size.width / resim.width;
+    final sy = size.height / resim.height;
+    Offset? nokta(PoseLandmarkType t) {
+      final l = poz.landmarks[t];
+      if (l == null || l.likelihood < 0.5) return null;
+      final x = l.x * sx;
+      return Offset(ayna ? size.width - x : x, l.y * sy);
+    }
+
+    final cizgi = Paint()
+      ..color = const Color(0xFFF2A33A)
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+    final daire = Paint()..color = Colors.white;
+    for (final b in baglar) {
+      final a = nokta(b[0]);
+      final c = nokta(b[1]);
+      if (a != null && c != null) canvas.drawLine(a, c, cizgi);
+    }
+    for (final t in PoseLandmarkType.values) {
+      final p = nokta(t);
+      if (p != null) canvas.drawCircle(p, 4, daire);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant IskeletCizer eski) => true;
 }
