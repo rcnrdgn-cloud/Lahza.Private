@@ -458,4 +458,504 @@ class _KameraEkraniState extends State<KameraEkrani> {
       // Kadrajda insan varsa anın gücü (en baskın ruh hali) hesaba katılır
       if (_yuzSayisi > 0 && _baskin != null) {
         t = t * 0.5 + _baskinPuan * 0.5;
-     
+        if (_gozKapali && _baskin != 'Düşünceli' && t > 50) t = 50.0;
+      }
+
+      if (mounted) {
+        setState(() {
+          _isikPuani = isik;
+          _netlikPuani = net;
+          _sabitlikPuani = sabit;
+          _toplamPuan = t.round();
+          _hamParlaklik = parlaklik;
+          _hamNetlik = netlik;
+          _hamHareket = hareket;
+        });
+      }
+
+      // Kareyi puanıyla birlikte hafızaya al (zirve seçimi için)
+      final tr = t.round();
+      if (_otomatik && img.planes.length >= 3) {
+        _tampon.add(_Kare(
+          y: Uint8List.fromList(img.planes[0].bytes),
+          u: Uint8List.fromList(img.planes[1].bytes),
+          v: Uint8List.fromList(img.planes[2].bytes),
+          genislik: w,
+          yukseklik: h,
+          ySatir: img.planes[0].bytesPerRow,
+          uvSatir: img.planes[1].bytesPerRow,
+          uvAdim: img.planes[1].bytesPerPixel ?? 1,
+          puan: tr,
+          album: (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
+              ? 'Lahza - $_baskin'
+              : 'Lahza',
+        ));
+        if (_tampon.length > tamponBoyu) _tampon.removeAt(0);
+      }
+
+      // Otomatik çekim: eşik aşılınca zirveyi izle, düşüşe geçince en iyi kareyi kaydet
+      if (_otomatik && !_cekiliyor && !_kaydediliyor && _geriSayim == 0) {
+        final simdi = DateTime.now();
+        final bekleme = simdi.difference(_sonCekim).inMilliseconds;
+        if (bekleme > 3000) {
+          if (tr >= esik) {
+            _zirveBaslangic ??= simdi;
+            if (tr > _zirvePuan) _zirvePuan = tr;
+            final sure = simdi.difference(_zirveBaslangic!).inMilliseconds;
+            if (tr <= _zirvePuan - 8 || sure > 1500) _zirveKaydet();
+          } else if (_zirveBaslangic != null) {
+            _zirveKaydet();
+          }
+        }
+      }
+    } finally {
+      _isleniyor = false;
+    }
+  }
+
+  // Hafızadaki en yüksek puanlı kareyi JPEG'e çevirip galeriye kaydeder.
+  Future<void> _zirveKaydet() async {
+    _zirveBaslangic = null;
+    _zirvePuan = 0;
+    if (_tampon.isEmpty || _kaydediliyor) return;
+    _kaydediliyor = true;
+    _sonCekim = DateTime.now();
+    var enIyi = _tampon.first;
+    for (final k in _tampon) {
+      if (k.puan > enIyi.puan) enIyi = k;
+    }
+    _tampon.clear();
+    setState(() {
+      _cekimSayisi++;
+      _flas = true;
+    });
+    Future.delayed(const Duration(milliseconds: 150), () {
+      if (mounted) setState(() => _flas = false);
+    });
+    try {
+      final jpeg = await compute(kareyiJpegYap, {
+        'y': enIyi.y,
+        'u': enIyi.u,
+        'v': enIyi.v,
+        'w': enIyi.genislik,
+        'h': enIyi.yukseklik,
+        'ySatir': enIyi.ySatir,
+        'uvSatir': enIyi.uvSatir,
+        'uvAdim': enIyi.uvAdim,
+        'donus': kameralar[_kameraIndex].sensorOrientation,
+      });
+      if (!await Gal.hasAccess()) {
+        await Gal.requestAccess();
+      }
+      await Gal.putImageBytes(jpeg, album: enIyi.album);
+      final dosya = File(
+          '${Directory.systemTemp.path}/lahza_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await dosya.writeAsBytes(jpeg);
+      if (mounted) setState(() => _sonFoto = dosya.path);
+    } catch (e) {
+      if (mounted) setState(() => _yuzHata = 'kayıt: $e');
+    } finally {
+      _kaydediliyor = false;
+    }
+  }
+
+  Future<void> _cek() async {
+    final kontrol = _kontrol;
+    if (_cekiliyor || kontrol == null) return;
+    _cekiliyor = true;
+    final albumAdi = (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
+        ? 'Lahza - $_baskin'
+        : 'Lahza';
+    try {
+      await kontrol.stopImageStream();
+      final foto = await kontrol.takePicture();
+      _sonCekim = DateTime.now();
+      setState(() {
+        _sonFoto = foto.path;
+        _cekimSayisi++;
+        _flas = true;
+      });
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (mounted) setState(() => _flas = false);
+      });
+      try {
+        if (!await Gal.hasAccess()) {
+          await Gal.requestAccess();
+        }
+        await Gal.putImage(foto.path, album: albumAdi);
+      } catch (_) {}
+      _oncekiKare = null;
+      await kontrol.startImageStream(_analiz);
+    } finally {
+      _cekiliyor = false;
+    }
+  }
+
+  Widget _rozet(String ad, int puan) {
+    final renk = puan >= 70
+        ? Colors.green
+        : (puan >= 40 ? Colors.orange : Colors.red);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: renk.withAlpha(220),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        '$ad $puan',
+        style: const TextStyle(
+            color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+      ),
+    );
+  }
+
+  Widget _griRozet(String yazi) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        yazi,
+        style: const TextStyle(color: Colors.white70, fontSize: 13),
+      ),
+    );
+  }
+
+  Widget _yuvarlakDugme({
+    required Widget icerik,
+    required VoidCallback onTap,
+    Color renk = Colors.black54,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 64,
+        height: 64,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: renk,
+          border: Border.all(color: Colors.white, width: 2),
+        ),
+        child: icerik,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_hata != null) {
+      return Scaffold(body: Center(child: Text(_hata!)));
+    }
+    final kontrol = _kontrol;
+    if (kontrol == null || !kontrol.value.isInitialized) {
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+    final Widget yuzRozeti;
+    if (!_yuzDestekli) {
+      yuzRozeti = _griRozet('Yüz analizi yok');
+    } else if (_yuzSayisi == 0) {
+      yuzRozeti = _griRozet('Yüz yok');
+    } else if (_gozKapali && _baskin != 'Düşünceli') {
+      yuzRozeti = _rozet('Göz kapalı', 0);
+    } else {
+      yuzRozeti = _rozet(_baskin ?? 'Yüz $_yuzSayisi', _baskinPuan);
+    }
+    String kisalt(String ad) => ad.substring(0, 1);
+    final katSatiri = _kategoriler.entries
+        .map((e) => '${kisalt(e.key)} ${e.value}')
+        .join(' · ');
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Center(
+              child: CameraPreview(
+                kontrol,
+                child: (_iskeletGoster && _poz != null)
+                    ? CustomPaint(
+                        painter: IskeletCizer(
+                          _poz!,
+                          _resimBoyutu,
+                          kameralar[_kameraIndex].lensDirection ==
+                              CameraLensDirection.front,
+                        ),
+                      )
+                    : null,
+              ),
+            ),
+            Positioned(
+              top: 10,
+              left: 8,
+              right: 8,
+              child: Column(
+                children: [
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      _rozet('Işık', _isikPuani),
+                      _rozet('Netlik', _netlikPuani),
+                      _rozet('Sabitlik', _sabitlikPuani),
+                      yuzRozeti,
+                      _rozet('Toplam', _toplamPuan),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                  if (_yuzSayisi > 0)
+                    Text(
+                      '$_hamYuz\n$katSatiri',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  if (_yuzHata.isNotEmpty)
+                    Text(
+                      'yüz hatası: $_yuzHata',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.orangeAccent, fontSize: 11),
+                    ),
+                ],
+              ),
+            ),
+            if (_sonFoto != null)
+              Positioned(
+                left: 16,
+                bottom: 32,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.file(File(_sonFoto!),
+                      width: 70, height: 70, fit: BoxFit.cover),
+                ),
+              ),
+            Positioned(
+              right: 20,
+              bottom: 36,
+              child: _yuvarlakDugme(
+                renk: _otomatik ? Colors.green : Colors.black54,
+                onTap: () => setState(() {
+                  _otomatik = !_otomatik;
+                  _iyiSayac = 0;
+                  _tampon.clear();
+                  _zirveBaslangic = null;
+                  _zirvePuan = 0;
+                }),
+                icerik: Text(
+                  _otomatik ? 'OTO\nAÇIK' : 'OTO\nKAPALI',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+            if (kameralar.length > 1)
+              Positioned(
+                right: 20,
+                bottom: 112,
+                child: _yuvarlakDugme(
+                  onTap: _kameraDegistir,
+                  icerik: const Icon(Icons.cameraswitch,
+                      color: Colors.white, size: 28),
+                ),
+              ),
+            Positioned(
+              right: 20,
+              bottom: 188,
+              child: _yuvarlakDugme(
+                renk: _iskeletGoster ? Colors.green : Colors.black54,
+                onTap: () => setState(() => _iskeletGoster = !_iskeletGoster),
+                icerik: const Icon(Icons.accessibility_new,
+                    color: Colors.white, size: 28),
+              ),
+            ),
+            Positioned(
+              bottom: 110,
+              left: 0,
+              right: 0,
+              child: Column(
+                children: [
+                  Text(
+                    'Çekilen: $_cekimSayisi',
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                  if (_zirveBaslangic != null)
+                    const Text(
+                      '● Zirve izleniyor',
+                      style: TextStyle(color: Color(0xFFF2A33A), fontSize: 12),
+                    ),
+                  if (_iskeletGoster)
+                    const Text(
+                      'Poz modu: elini başının üstüne kaldır, 3 sn sonra çeker',
+                      style: TextStyle(color: Colors.white70, fontSize: 11),
+                    ),
+                ],
+              ),
+            ),
+            if (_geriSayim > 0)
+              Center(
+                child: Text(
+                  '$_geriSayim',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 120,
+                    fontWeight: FontWeight.bold,
+                    shadows: [Shadow(blurRadius: 12, color: Colors.black)],
+                  ),
+                ),
+              ),
+            if (_flas)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(color: Colors.white70),
+                ),
+              ),
+            Positioned(
+              bottom: 24,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: GestureDetector(
+                  onTap: _cek,
+                  child: Container(
+                    width: 76,
+                    height: 76,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white,
+                      border: Border.all(color: Colors.grey, width: 4),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Vücut iskeletini kamera görüntüsünün üzerine çizer.
+class IskeletCizer extends CustomPainter {
+  final Pose poz;
+  final Size resim;
+  final bool ayna;
+  IskeletCizer(this.poz, this.resim, this.ayna);
+
+  static const List<List<PoseLandmarkType>> baglar = [
+    [PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder],
+    [PoseLandmarkType.leftShoulder, PoseLandmarkType.leftElbow],
+    [PoseLandmarkType.leftElbow, PoseLandmarkType.leftWrist],
+    [PoseLandmarkType.rightShoulder, PoseLandmarkType.rightElbow],
+    [PoseLandmarkType.rightElbow, PoseLandmarkType.rightWrist],
+    [PoseLandmarkType.leftShoulder, PoseLandmarkType.leftHip],
+    [PoseLandmarkType.rightShoulder, PoseLandmarkType.rightHip],
+    [PoseLandmarkType.leftHip, PoseLandmarkType.rightHip],
+    [PoseLandmarkType.leftHip, PoseLandmarkType.leftKnee],
+    [PoseLandmarkType.leftKnee, PoseLandmarkType.leftAnkle],
+    [PoseLandmarkType.rightHip, PoseLandmarkType.rightKnee],
+    [PoseLandmarkType.rightKnee, PoseLandmarkType.rightAnkle],
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (resim.width == 0 || resim.height == 0) return;
+    final sx = size.width / resim.width;
+    final sy = size.height / resim.height;
+    Offset? nokta(PoseLandmarkType t) {
+      final l = poz.landmarks[t];
+      if (l == null || l.likelihood < 0.5) return null;
+      final x = l.x * sx;
+      return Offset(ayna ? size.width - x : x, l.y * sy);
+    }
+
+    final cizgi = Paint()
+      ..color = const Color(0xFFF2A33A)
+      ..strokeWidth = 4
+      ..strokeCap = StrokeCap.round;
+    final daire = Paint()..color = Colors.white;
+    for (final b in baglar) {
+      final a = nokta(b[0]);
+      final c = nokta(b[1]);
+      if (a != null && c != null) canvas.drawLine(a, c, cizgi);
+    }
+    for (final t in PoseLandmarkType.values) {
+      final p = nokta(t);
+      if (p != null) canvas.drawCircle(p, 4, daire);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant IskeletCizer eski) => true;
+}
+
+// Hafızada tutulan tek bir kamera karesi ve puanı
+class _Kare {
+  final Uint8List y;
+  final Uint8List u;
+  final Uint8List v;
+  final int genislik;
+  final int yukseklik;
+  final int ySatir;
+  final int uvSatir;
+  final int uvAdim;
+  final int puan;
+  final String album;
+  _Kare({
+    required this.y,
+    required this.u,
+    required this.v,
+    required this.genislik,
+    required this.yukseklik,
+    required this.ySatir,
+    required this.uvSatir,
+    required this.uvAdim,
+    required this.puan,
+    required this.album,
+  });
+}
+
+// YUV420 kareyi döndürülmüş JPEG'e çevirir (arka planda, ayrı iş parçacığında çalışır).
+Uint8List kareyiJpegYap(Map<String, dynamic> v) {
+  final Uint8List yb = v['y'];
+  final Uint8List ub = v['u'];
+  final Uint8List vb = v['v'];
+  final int w = v['w'];
+  final int h = v['h'];
+  final int ySatir = v['ySatir'];
+  final int uvSatir = v['uvSatir'];
+  final int uvAdim = v['uvAdim'];
+  final int donus = v['donus'];
+  final im = imglib.Image(width: w, height: h);
+  for (int y = 0; y < h; y++) {
+    final yo = y * ySatir;
+    final uo = (y >> 1) * uvSatir;
+    for (int x = 0; x < w; x++) {
+      final yy = yb[yo + x];
+      final ui = uo + (x >> 1) * uvAdim;
+      final uu = ub[ui] - 128;
+      final vv = vb[ui] - 128;
+      int r = yy + ((1436 * vv) >> 10);
+      int g = yy - ((352 * uu + 731 * vv) >> 10);
+      int b = yy + ((1815 * uu) >> 10);
+      r = r < 0 ? 0 : (r > 255 ? 255 : r);
+      g = g < 0 ? 0 : (g > 255 ? 255 : g);
+      b = b < 0 ? 0 : (b > 255 ? 255 : b);
+      im.setPixelRgb(x, y, r, g, b);
+    }
+  }
+  final sonuc = donus == 0 ? im : imglib.copyRotate(im, angle: donus);
+  return Uint8List.fromList(imglib.encodeJpg(sonuc, quality: 92));
+}
