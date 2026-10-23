@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 
 late List<CameraDescription> kameralar;
 
@@ -23,13 +24,16 @@ class KameraEkrani extends StatefulWidget {
 
 class _KameraEkraniState extends State<KameraEkrani> {
   CameraController? _kontrol;
+  int _kameraIndex = 0;
   String? _sonFoto;
   String? _hata;
   bool _cekiliyor = false;
   bool _isleniyor = false;
+  bool _degisiyor = false;
   int _kareSayaci = 0;
   Uint8List? _oncekiKare;
 
+  // Görüntü puanları
   int _isikPuani = 0;
   int _netlikPuani = 0;
   int _sabitlikPuani = 0;
@@ -38,9 +42,22 @@ class _KameraEkraniState extends State<KameraEkrani> {
   double _hamNetlik = 0;
   double _hamHareket = 0;
 
+  // Yüz analizi
+  final FaceDetector _yuzDedektoru = FaceDetector(
+    options: FaceDetectorOptions(
+      enableClassification: true,
+      performanceMode: FaceDetectorMode.fast,
+    ),
+  );
+  bool _yuzIsleniyor = false;
+  bool _yuzDestekli = true;
+  int _yuzSayisi = 0;
+  int? _yuzPuani;
+  bool _gozKapali = false;
+
   // Otomatik çekim
-  static const int esik = 80; // Toplam puan bu değeri geçerse
-  static const int gerekenArdisik = 3; // art arda bu kadar ölçüm iyi olmalı
+  static const int esik = 80;
+  static const int gerekenArdisik = 3;
   bool _otomatik = false;
   int _iyiSayac = 0;
   int _cekimSayisi = 0;
@@ -50,30 +67,110 @@ class _KameraEkraniState extends State<KameraEkrani> {
   @override
   void initState() {
     super.initState();
-    _kontrol = CameraController(
-      kameralar.first,
+    _kameraBaslat(0);
+  }
+
+  Future<void> _kameraBaslat(int index) async {
+    final kontrol = CameraController(
+      kameralar[index],
       ResolutionPreset.high,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.yuv420,
+      imageFormatGroup: ImageFormatGroup.nv21,
     );
-    _kontrol!.initialize().then((_) async {
+    try {
+      await kontrol.initialize();
       if (!mounted) return;
-      await _kontrol!.startImageStream(_analiz);
+      _kontrol = kontrol;
+      _kameraIndex = index;
+      _oncekiKare = null;
+      _yuzSayisi = 0;
+      _yuzPuani = null;
+      await kontrol.startImageStream(_analiz);
       setState(() {});
-    }).catchError((e) {
+    } catch (e) {
       setState(() => _hata = 'Kamera açılamadı: $e');
-    });
+    }
+  }
+
+  Future<void> _kameraDegistir() async {
+    if (kameralar.length < 2 || _degisiyor || _cekiliyor) return;
+    _degisiyor = true;
+    final eski = _kontrol;
+    setState(() => _kontrol = null);
+    try {
+      await eski?.stopImageStream();
+    } catch (_) {}
+    await eski?.dispose();
+    await _kameraBaslat((_kameraIndex + 1) % kameralar.length);
+    _degisiyor = false;
   }
 
   @override
   void dispose() {
     _kontrol?.dispose();
+    _yuzDedektoru.close();
     super.dispose();
   }
 
-  // Her 5 karede bir ışık, netlik ve sabitlik ölçer.
+  // ML Kit için kamera karesini dönüştürür (Android, NV21).
+  InputImage? _girdiOlustur(CameraImage img) {
+    final rotasyon = InputImageRotationValue.fromRawValue(
+        kameralar[_kameraIndex].sensorOrientation);
+    if (rotasyon == null) return null;
+    final format = InputImageFormatValue.fromRawValue(img.format.raw);
+    if (format == null || format != InputImageFormat.nv21) return null;
+    if (img.planes.length != 1) return null;
+    final plane = img.planes.first;
+    return InputImage.fromBytes(
+      bytes: plane.bytes,
+      metadata: InputImageMetadata(
+        size: Size(img.width.toDouble(), img.height.toDouble()),
+        rotation: rotasyon,
+        format: format,
+        bytesPerRow: plane.bytesPerRow,
+      ),
+    );
+  }
+
+  Future<void> _yuzAnaliz(CameraImage img) async {
+    final girdi = _girdiOlustur(img);
+    if (girdi == null) {
+      _yuzDestekli = false;
+      return;
+    }
+    _yuzIsleniyor = true;
+    try {
+      final yuzler = await _yuzDedektoru.processImage(girdi);
+      int? enDusuk;
+      bool kapali = false;
+      for (final y in yuzler) {
+        final sol = y.leftEyeOpenProbability ?? 0.5;
+        final sag = y.rightEyeOpenProbability ?? 0.5;
+        final goz = sol < sag ? sol : sag;
+        final gulus = y.smilingProbability ?? 0.5;
+        if (goz < 0.4) kapali = true;
+        final p = (goz * 60 + gulus * 40).round();
+        if (enDusuk == null || p < enDusuk) enDusuk = p;
+      }
+      if (mounted) {
+        setState(() {
+          _yuzSayisi = yuzler.length;
+          _yuzPuani = enDusuk;
+          _gozKapali = kapali;
+        });
+      }
+    } catch (_) {
+    } finally {
+      _yuzIsleniyor = false;
+    }
+  }
+
+  // Her 5 karede bir ışık, netlik ve sabitlik ölçer; 10 karede bir yüz arar.
   void _analiz(CameraImage img) {
     _kareSayaci++;
+    if (_kareSayaci % 10 == 0 && !_yuzIsleniyor) {
+      _yuzAnaliz(img);
+    }
     if (_isleniyor || _kareSayaci % 5 != 0) return;
     _isleniyor = true;
     try {
@@ -83,7 +180,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final w = img.width;
       final h = img.height;
 
-      // 1) Parlaklık + hareket için küçük örnek (tüm kare, 8 pikselde bir)
+      // 1) Parlaklık + hareket için küçük örnek
       final kucuk = Uint8List(((h + 7) ~/ 8) * ((w + 7) ~/ 8));
       int toplam = 0;
       int k = 0;
@@ -98,7 +195,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       if (k == 0) return;
       final parlaklik = toplam / k;
 
-      // 2) Hareket: önceki örnekle karşılaştır
+      // 2) Hareket
       double hareket = 0;
       final onceki = _oncekiKare;
       if (onceki != null && onceki.length == kucuk.length) {
@@ -110,7 +207,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       }
       _oncekiKare = kucuk;
 
-      // 3) Netlik: sadece merkez bölge (%60)
+      // 3) Netlik: merkez bölge
       final x0 = (w * 0.2).toInt();
       final x1 = (w * 0.8).toInt();
       final y0 = (h * 0.2).toInt();
@@ -127,13 +224,20 @@ class _KameraEkraniState extends State<KameraEkrani> {
       }
       final netlik = kAdet == 0 ? 0.0 : kenar / kAdet;
 
-      // Puanlar (0-100)
+      // Puanlar
       final isik =
           (100 - ((parlaklik - 130).abs() / 130 * 100)).clamp(0, 100).round();
       final net = (netlik / 8 * 100).clamp(0, 100).round();
       final sabit = (100 - (hareket - 2) * 8).clamp(0, 100).round();
-      var t = isik * 0.3 + net * 0.3 + sabit * 0.4;
+      double t = isik * 0.3 + net * 0.3 + sabit * 0.4;
       if (sabit < 50) t = t * 0.5;
+
+      // Kadrajda insan varsa yüz puanı da hesaba katılır
+      final yp = _yuzPuani;
+      if (_yuzSayisi > 0 && yp != null) {
+        t = t * 0.6 + yp * 0.4;
+        if (_gozKapali && t > 50) t = 50.0;
+      }
 
       if (mounted) {
         setState(() {
@@ -166,11 +270,12 @@ class _KameraEkraniState extends State<KameraEkrani> {
   }
 
   Future<void> _cek() async {
-    if (_cekiliyor) return;
+    final kontrol = _kontrol;
+    if (_cekiliyor || kontrol == null) return;
     _cekiliyor = true;
     try {
-      await _kontrol!.stopImageStream();
-      final foto = await _kontrol!.takePicture();
+      await kontrol.stopImageStream();
+      final foto = await kontrol.takePicture();
       _sonCekim = DateTime.now();
       setState(() {
         _sonFoto = foto.path;
@@ -187,7 +292,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
         await Gal.putImage(foto.path, album: 'Lahza');
       } catch (_) {}
       _oncekiKare = null;
-      await _kontrol!.startImageStream(_analiz);
+      await kontrol.startImageStream(_analiz);
     } finally {
       _cekiliyor = false;
     }
@@ -211,124 +316,45 @@ class _KameraEkraniState extends State<KameraEkrani> {
     );
   }
 
+  Widget _griRozet(String yazi) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        yazi,
+        style: const TextStyle(color: Colors.white70, fontSize: 13),
+      ),
+    );
+  }
+
+  Widget _yuvarlakDugme({
+    required Widget icerik,
+    required VoidCallback onTap,
+    Color renk = Colors.black54,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 64,
+        height: 64,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: renk,
+          border: Border.all(color: Colors.white, width: 2),
+        ),
+        child: icerik,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_hata != null) {
       return Scaffold(body: Center(child: Text(_hata!)));
     }
-    if (_kontrol == null || !_kontrol!.value.isInitialized) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: Stack(
-          children: [
-            Center(child: CameraPreview(_kontrol!)),
-            Positioned(
-              top: 10,
-              left: 8,
-              right: 8,
-              child: Column(
-                children: [
-                  Wrap(
-                    alignment: WrapAlignment.center,
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: [
-                      _rozet('Işık', _isikPuani),
-                      _rozet('Netlik', _netlikPuani),
-                      _rozet('Sabitlik', _sabitlikPuani),
-                      _rozet('Toplam', _toplamPuan),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-            if (_sonFoto != null)
-              Positioned(
-                left: 16,
-                bottom: 32,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.file(File(_sonFoto!),
-                      width: 70, height: 70, fit: BoxFit.cover),
-                ),
-              ),
-            Positioned(
-              right: 20,
-              bottom: 36,
-              child: GestureDetector(
-                onTap: () => setState(() {
-                  _otomatik = !_otomatik;
-                  _iyiSayac = 0;
-                }),
-                child: Container(
-                  width: 64,
-                  height: 64,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _otomatik ? Colors.green : Colors.black54,
-                    border: Border.all(color: Colors.white, width: 2),
-                  ),
-                  child: Text(
-                    _otomatik ? 'OTO\nAÇIK' : 'OTO\nKAPALI',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ),
-            ),
-            Positioned(
-              bottom: 110,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Text(
-                  'Çekilen: $_cekimSayisi',
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                ),
-              ),
-            ),
-            if (_flas)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: Container(color: Colors.white70),
-                ),
-              ),
-            Positioned(
-              bottom: 24,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: GestureDetector(
-                  onTap: _cek,
-                  child: Container(
-                    width: 76,
-                    height: 76,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.white,
-                      border: Border.all(color: Colors.grey, width: 4),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+    final kontrol = _kontrol;
+   
