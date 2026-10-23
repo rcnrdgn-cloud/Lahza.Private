@@ -25,7 +25,7 @@ jobs:
           cd app
           flutter pub add camera
           flutter pub add gal
-          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="lahza"|android:label="Lahzâ"|' android/app/src/main/AndroidManifest.xml
           flutter build apk --release
       - uses: actions/upload-artifact@v4
