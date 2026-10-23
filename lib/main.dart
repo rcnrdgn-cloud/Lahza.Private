@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:io';
 import 'dart:typed_data';
@@ -6,6 +7,7 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:image/image.dart' as imglib;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
@@ -51,6 +53,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
   final FaceDetector _yuzDedektoru = FaceDetector(
     options: FaceDetectorOptions(
       enableClassification: true,
+      enableContours: true,
       performanceMode: FaceDetectorMode.fast,
     ),
   );
@@ -67,6 +70,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
   int _baskinPuan = 0;
   String _hamYuz = '';
   bool _kollarYukari = false;
+  bool _tamBoy = false;
+  List<String> _teknik = [];
 
   // Poz (iskelet) analizi ve el kaldırma jesti
   final PoseDetector _pozDedektoru = PoseDetector(
@@ -217,38 +222,75 @@ class _KameraEkraniState extends State<KameraEkrani> {
       }
 
       double kirp(double v) => v < 0 ? 0.0 : (v > 1 ? 1.0 : v);
+      double enBuyuk(double x, double y) => x > y ? x : y;
       final kat = <String, int>{};
+      final teknik = <String>[];
       String ham = '';
       if (yuzler.isNotEmpty) {
         final a = yuzler.first;
+        final n = yuzler.length;
         final s = a.smilingProbability ?? 0.0;
         final gl = a.leftEyeOpenProbability ?? 0.5;
         final gr = a.rightEyeOpenProbability ?? 0.5;
         final g = gl < gr ? gl : gr;
         final yaw = (a.headEulerAngleY ?? 0).abs(); // sağa-sola dönüş
         final egim = a.headEulerAngleX ?? 0; // + yukarı, - aşağı
+        final yatik = (a.headEulerAngleZ ?? 0).abs(); // başın yana yatıklığı
         final sabit = _sabitlikPuani / 100.0;
+        final hareket = kirp((_hamHareket - 3) / 8); // orta-yüksek hareket = canlılık
+        final kollar = _kollarYukari ? 1.0 : 0.0;
 
-        // Eğlenceli: gülüş, kollar havada, birden fazla gülen kişi
-        double e = s * 0.75 +
-            (_kollarYukari ? 0.2 : 0) +
-            (gulenSayisi >= 2 ? 0.15 : 0);
-        if (g < 0.3) e *= 0.7;
-        kat['Eğlenceli'] = (kirp(e) * 100).round();
+        // Ağız açıklığı (yüz hatlarından): kahkaha veya şaşkınlık işareti
+        double agiz = 0;
+        final ust = a.contours[FaceContourType.upperLipBottom];
+        final alt = a.contours[FaceContourType.lowerLipTop];
+        if (ust != null &&
+            alt != null &&
+            ust.points.isNotEmpty &&
+            alt.points.isNotEmpty) {
+          final u = ust.points[ust.points.length ~/ 2];
+          final l = alt.points[alt.points.length ~/ 2];
+          agiz = kirp(((l.y - u.y).abs() / a.boundingBox.height) / 0.12);
+        }
 
-        // Karizmatik: kameraya değil yana bakış (~30°), sakin ifade, hareketsiz
-        final bakis = kirp(1 - (yaw - 30).abs() / 25);
-        double k = bakis * 0.45 + kirp(1 - s * 1.5) * 0.25 + sabit * 0.3;
-        if (g < 0.4) k *= 0.5;
-        kat['Karizmatik'] = (kirp(k) * 100).round();
+        // NEŞELİ: içten gülümseme, gözlerde mutluluk
+        double nese = s * 0.7 + g * 0.15 + agiz * s * 0.15;
+        if (g < 0.3) nese *= 0.7;
+        kat['Neşeli'] = (kirp(nese) * 100).round();
 
-        // Düşünceli / hüzünlü: baş öne eğik, gülüş yok, hareketsiz
-        final egik = kirp((-egim - 5) / 20);
-        final d = egik * 0.5 + kirp(1 - s * 2) * 0.3 + sabit * 0.2;
-        kat['Düşünceli'] = (kirp(d) * 100).round();
+        // EĞLENCELİ: sosyal etkileşim, kahkaha, kollar havada
+        final gulenOrani = (gulenSayisi > 3 ? 3 : gulenSayisi) / 3;
+        final eglence = (n >= 2 ? 0.25 : 0.0) +
+            gulenOrani * 0.25 +
+            agiz * s * 0.25 +
+            kollar * 0.15 +
+            hareket * 0.1;
+        kat['Eğlenceli'] = (kirp(eglence) * 100).round();
 
-        // Samimi: iki yüz birbirine yakın, gülümsüyor, birbirine dönük
-        if (yuzler.length >= 2) {
+        // ENERJİK: hareket, canlı beden dili
+        final enerji = hareket * 0.5 + kollar * 0.3 + agiz * 0.1 + s * 0.1;
+        kat['Enerjik'] = (kirp(enerji) * 100).round();
+
+        // KARİZMATİK: kendinden emin bakış, düz duruş, kontrollü ifade
+        final bakis = enBuyuk(kirp(1 - (yaw - 25).abs() / 20), yaw < 8 ? 0.6 : 0.0);
+        final sakin = kirp(1 - (s - 0.2).abs() * 2.5);
+        final duz = kirp(1 - yatik / 20);
+        double karizma =
+            bakis * 0.3 + sakin * 0.2 + duz * 0.15 + sabit * 0.2 + g * 0.15;
+        if (g < 0.4) karizma *= 0.5;
+        kat['Karizmatik'] = (kirp(karizma) * 100).round();
+
+        // GİZEMLİ / CİDDİ: dolaylı bakış, minimal mimik, dramatik ışık
+        final ciddi = kirp(1 - s * 2);
+        final dolayli = kirp(enBuyuk(yaw - 12, -egim - 6) / 20);
+        final karanlik = kirp((150 - _hamParlaklik) / 80);
+        final gizem =
+            ciddi * 0.35 + dolayli * 0.35 + sabit * 0.15 + karanlik * 0.15;
+        kat['Gizemli'] = (kirp(gizem) * 100).round();
+
+        // SAMİMİ: yakınlık, sıcak etkileşim, doğal gülümseme
+        double samimi;
+        if (n >= 2) {
           final b2 = yuzler[1];
           final r1 = a.boundingBox;
           final r2 = b2.boundingBox;
@@ -258,11 +300,28 @@ class _KameraEkraniState extends State<KameraEkrani> {
           final s2 = b2.smilingProbability ?? 0.0;
           final donuk =
               ((b2.headEulerAngleY ?? 0).abs() > 15 && yaw > 15) ? 1.0 : 0.0;
-          final sm = yakin * 0.5 + ((s + s2) / 2) * 0.3 + donuk * 0.2;
-          kat['Samimi'] = (kirp(sm) * 100).round();
+          samimi = yakin * 0.45 + ((s + s2) / 2) * 0.35 + donuk * 0.2;
+        } else {
+          // Tek kişide: yumuşak, doğal tebessüm
+          samimi = kirp(1 - (s - 0.5).abs() * 3) * 0.55;
         }
+        kat['Samimi'] = (kirp(samimi) * 100).round();
 
-        ham = 'dönüş ${yaw.toStringAsFixed(0)}° · eğim ${egim.toStringAsFixed(0)}° · gülüş ${(s * 100).round()} · göz ${(g * 100).round()}';
+        // ŞAŞKIN: ağız açık ama gülüş yok, gözler açık
+        final saskin = agiz * kirp(1 - s * 2) * (g > 0.8 ? 1.0 : 0.6);
+        kat['Şaşkın'] = (kirp(saskin) * 100).round();
+
+        // Teknik etiketler
+        if (kameralar[_kameraIndex].lensDirection == CameraLensDirection.front) {
+          teknik.add('Selfie');
+        }
+        teknik.add(n == 1 ? 'Portre' : (n == 2 ? 'İkili' : 'Grup'));
+        final dikey = kameralar[_kameraIndex].sensorOrientation % 180 != 0;
+        final kareGenislik = (dikey ? img.height : img.width).toDouble();
+        if (a.boundingBox.width / kareGenislik > 0.3) teknik.add('Yakın çekim');
+        if (_tamBoy) teknik.add('Tam boy');
+
+        ham = 'dönüş ${yaw.toStringAsFixed(0)}° · eğim ${egim.toStringAsFixed(0)}° · gülüş ${(s * 100).round()} · göz ${(g * 100).round()} · ağız ${(agiz * 100).round()}';
       }
 
       String? baskin;
@@ -283,6 +342,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
           _baskin = baskin;
           _baskinPuan = baskinPuan;
           _hamYuz = ham;
+          _teknik = teknik;
           if (_yuzHata.startsWith('PlatformException')) _yuzHata = '';
         });
       }
@@ -342,6 +402,14 @@ class _KameraEkraniState extends State<KameraEkrani> {
         }
       }
       _kollarYukari = kollar;
+      bool tamBoy = false;
+      if (poz != null) {
+        final sol = poz.landmarks[PoseLandmarkType.leftAnkle];
+        final sag = poz.landmarks[PoseLandmarkType.rightAnkle];
+        tamBoy = (sol != null && sol.likelihood > 0.5) ||
+            (sag != null && sag.likelihood > 0.5);
+      }
+      _tamBoy = tamBoy;
 
       if (elYukarida && _iskeletGoster) {
         _elSayac++;
@@ -453,13 +521,13 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final net = (netlik / 8 * 100).clamp(0, 100).round();
       final sabit = (100 - (hareket - 2) * 8).clamp(0, 100).round();
       double t = isik * 0.3 + net * 0.3 + sabit * 0.4;
-      if (sabit < 50) t = t * 0.5;
+      if (sabit < 50 && _baskin != 'Enerjik') t = t * 0.5;
 
       // Kadrajda insan varsa yüz puanı da hesaba katılır
       // Kadrajda insan varsa anın gücü (en baskın ruh hali) hesaba katılır
       if (_yuzSayisi > 0 && _baskin != null) {
         t = t * 0.5 + _baskinPuan * 0.5;
-        if (_gozKapali && _baskin != 'Düşünceli' && t > 50) t = 50.0;
+        if (_gozKapali && _baskin != 'Gizemli' && t > 50) t = 50.0;
       }
 
       if (mounted) {
@@ -490,6 +558,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
           kategori: (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
               ? _baskin
               : null,
+          etiketler: Map<String, int>.from(_kategoriler),
+          teknik: List<String>.from(_teknik),
         ));
         if (_tampon.length > tamponBoyu) _tampon.removeAt(0);
       }
@@ -512,6 +582,28 @@ class _KameraEkraniState extends State<KameraEkrani> {
     } finally {
       _isleniyor = false;
     }
+  }
+
+  // Fotoğrafın bir kopyasını ve etiketlerini uygulamanın kendi arşivine yazar
+  // (ileride etiketlerle arama yapılabilen arşiv ekranı için).
+  Future<void> _arsiveEkle(Uint8List jpeg, Map<String, int> etiketler,
+      List<String> teknik, String? anaEtiket) async {
+    try {
+      final kok = await getApplicationDocumentsDirectory();
+      final klasor = Directory('${kok.path}/arsiv');
+      if (!await klasor.exists()) await klasor.create(recursive: true);
+      final ad = 'lahza_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await File('${klasor.path}/$ad').writeAsBytes(jpeg);
+      final kayit = jsonEncode({
+        'dosya': ad,
+        'zaman': DateTime.now().toIso8601String(),
+        'ana': anaEtiket,
+        'etiketler': etiketler,
+        'teknik': teknik,
+      });
+      await File('${klasor.path}/etiketler.jsonl')
+          .writeAsString('$kayit\n', mode: FileMode.append);
+    } catch (_) {}
   }
 
   // Hafızadaki en yüksek puanlı kareyi JPEG'e çevirip galeriye kaydeder.
@@ -555,6 +647,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       if (sonuc.length > 1 && enIyi.kategori != null) {
         await Gal.putImageBytes(sonuc[1], album: 'Lahza - ${enIyi.kategori}');
       }
+      await _arsiveEkle(jpeg, enIyi.etiketler, enIyi.teknik, enIyi.kategori);
       final dosya = File(
           '${Directory.systemTemp.path}/lahza_${DateTime.now().millisecondsSinceEpoch}.jpg');
       await dosya.writeAsBytes(jpeg);
@@ -573,6 +666,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
     final kategori = (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
         ? _baskin
         : null;
+    final etiketAni = Map<String, int>.from(_kategoriler);
+    final teknikAni = List<String>.from(_teknik);
     try {
       await kontrol.stopImageStream();
       final foto = await kontrol.takePicture();
@@ -590,6 +685,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
           await Gal.requestAccess();
         }
         await Gal.putImage(foto.path, album: 'Lahza');
+        await _arsiveEkle(
+            await File(foto.path).readAsBytes(), etiketAni, teknikAni, kategori);
         if (kategori != null) {
           final efektli = await compute(
               dosyayaEfektUygula, {'yol': foto.path, 'kategori': kategori});
@@ -619,6 +716,21 @@ class _KameraEkraniState extends State<KameraEkrani> {
         '$ad $puan',
         style: const TextStyle(
             color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+      ),
+    );
+  }
+
+  Widget _etiket(String yazi, Color renk) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: renk,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        yazi,
+        style: const TextStyle(
+            color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -675,15 +787,27 @@ class _KameraEkraniState extends State<KameraEkrani> {
       yuzRozeti = _griRozet('Yüz analizi yok');
     } else if (_yuzSayisi == 0) {
       yuzRozeti = _griRozet('Yüz yok');
-    } else if (_gozKapali && _baskin != 'Düşünceli') {
+    } else if (_gozKapali && _baskin != 'Gizemli') {
       yuzRozeti = _rozet('Göz kapalı', 0);
     } else {
       yuzRozeti = _rozet(_baskin ?? 'Yüz $_yuzSayisi', _baskinPuan);
     }
-    String kisalt(String ad) => ad.substring(0, 1);
+    const kisaltma = {
+      'Neşeli': 'Ne',
+      'Eğlenceli': 'Eğ',
+      'Enerjik': 'En',
+      'Karizmatik': 'Ka',
+      'Gizemli': 'Gi',
+      'Samimi': 'Sa',
+      'Şaşkın': 'Şa',
+    };
     final katSatiri = _kategoriler.entries
-        .map((e) => '${kisalt(e.key)} ${e.value}')
+        .map((e) => '${kisaltma[e.key] ?? e.key} ${e.value}')
         .join(' · ');
+    // Öne çıkan etiketler (40 ve üstü, en yüksek 3) + teknik etiketler
+    final sirali = _kategoriler.entries.toList()
+      ..sort((x, y) => y.value.compareTo(x.value));
+    final oneCikan = sirali.where((e) => e.value >= 40).take(3).toList();
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
@@ -727,6 +851,20 @@ class _KameraEkraniState extends State<KameraEkrani> {
                     'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
                     style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
+                  if (_yuzSayisi > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          for (final e in oneCikan)
+                            _etiket('${e.key} ${e.value}', const Color(0xFFF2A33A)),
+                          for (final t in _teknik) _etiket(t, Colors.white24),
+                        ],
+                      ),
+                    ),
                   if (_yuzSayisi > 0)
                     Text(
                       '$_hamYuz\n$katSatiri',
@@ -927,6 +1065,8 @@ class _Kare {
   final int uvAdim;
   final int puan;
   final String? kategori;
+  final Map<String, int> etiketler;
+  final List<String> teknik;
   _Kare({
     required this.y,
     required this.u,
@@ -938,6 +1078,8 @@ class _Kare {
     required this.uvAdim,
     required this.puan,
     required this.kategori,
+    required this.etiketler,
+    required this.teknik,
   });
 }
 
@@ -1011,12 +1153,36 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
       vBaslangic = 0.55;
       vMiktar = 0.45;
       break;
-    case 'Eğlenceli': // canlı ve sıcak
-      doygunluk = 1.3;
-      kontrast = 1.08;
-      parlaklik = 1.04;
+    case 'Neşeli': // aydınlık ve sıcak
+      doygunluk = 1.2;
+      kontrast = 1.05;
+      parlaklik = 1.06;
       dr = 8;
       db = -6;
+      break;
+    case 'Enerjik': // güçlü kontrast, canlı renkler
+      doygunluk = 1.25;
+      kontrast = 1.2;
+      break;
+    case 'Gizemli': // karanlık, soluk, serin, belirgin vinyet
+      doygunluk = 0.5;
+      kontrast = 1.1;
+      parlaklik = 0.92;
+      dr = -6;
+      db = 8;
+      vBaslangic = 0.45;
+      vMiktar = 0.5;
+      break;
+    case 'Şaşkın': // hafif canlandırma
+      doygunluk = 1.15;
+      kontrast = 1.05;
+      break;
+    case 'Eğlenceli': // canlı ve sıcak
+      doygunluk = 1.35;
+      kontrast = 1.1;
+      parlaklik = 1.04;
+      dr = 6;
+      db = -4;
       break;
     case 'Düşünceli': // soluk, serin, hafif vinyet
       doygunluk = 0.55;
