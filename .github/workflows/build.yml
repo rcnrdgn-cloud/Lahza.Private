@@ -26,6 +26,7 @@ jobs:
           flutter pub add camera
           flutter pub add gal
           flutter pub add image
+          flutter pub add path_provider
           flutter pub add google_mlkit_face_detection
           flutter pub add google_mlkit_pose_detection
           flutter pub add dev:flutter_launcher_icons
