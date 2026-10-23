@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
 
 late List<CameraDescription> kameralar;
 
@@ -36,6 +37,15 @@ class _KameraEkraniState extends State<KameraEkrani> {
   double _hamParlaklik = 0;
   double _hamNetlik = 0;
   double _hamHareket = 0;
+
+  // Otomatik çekim
+  static const int esik = 80; // Toplam puan bu değeri geçerse
+  static const int gerekenArdisik = 3; // art arda bu kadar ölçüm iyi olmalı
+  bool _otomatik = false;
+  int _iyiSayac = 0;
+  int _cekimSayisi = 0;
+  DateTime _sonCekim = DateTime(2000);
+  bool _flas = false;
 
   @override
   void initState() {
@@ -120,7 +130,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       // Puanlar (0-100)
       final isik =
           (100 - ((parlaklik - 130).abs() / 130 * 100)).clamp(0, 100).round();
-      final net = (netlik / 35 * 100).clamp(0, 100).round();
+      final net = (netlik / 8 * 100).clamp(0, 100).round();
       final sabit = (100 - (hareket - 2) * 8).clamp(0, 100).round();
       var t = isik * 0.3 + net * 0.3 + sabit * 0.4;
       if (sabit < 50) t = t * 0.5;
@@ -136,6 +146,20 @@ class _KameraEkraniState extends State<KameraEkrani> {
           _hamHareket = hareket;
         });
       }
+
+      // Otomatik çekim kararı
+      if (_otomatik && !_cekiliyor) {
+        if (t.round() >= esik) {
+          _iyiSayac++;
+        } else {
+          _iyiSayac = 0;
+        }
+        final bekleme = DateTime.now().difference(_sonCekim).inMilliseconds;
+        if (_iyiSayac >= gerekenArdisik && bekleme > 3000) {
+          _iyiSayac = 0;
+          _cek();
+        }
+      }
     } finally {
       _isleniyor = false;
     }
@@ -147,7 +171,21 @@ class _KameraEkraniState extends State<KameraEkrani> {
     try {
       await _kontrol!.stopImageStream();
       final foto = await _kontrol!.takePicture();
-      setState(() => _sonFoto = foto.path);
+      _sonCekim = DateTime.now();
+      setState(() {
+        _sonFoto = foto.path;
+        _cekimSayisi++;
+        _flas = true;
+      });
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (mounted) setState(() => _flas = false);
+      });
+      try {
+        if (!await Gal.hasAccess()) {
+          await Gal.requestAccess();
+        }
+        await Gal.putImage(foto.path, album: 'Lahza');
+      } catch (_) {}
       _oncekiKare = null;
       await _kontrol!.startImageStream(_analiz);
     } finally {
@@ -222,6 +260,51 @@ class _KameraEkraniState extends State<KameraEkrani> {
                   borderRadius: BorderRadius.circular(8),
                   child: Image.file(File(_sonFoto!),
                       width: 70, height: 70, fit: BoxFit.cover),
+                ),
+              ),
+            Positioned(
+              right: 20,
+              bottom: 36,
+              child: GestureDetector(
+                onTap: () => setState(() {
+                  _otomatik = !_otomatik;
+                  _iyiSayac = 0;
+                }),
+                child: Container(
+                  width: 64,
+                  height: 64,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _otomatik ? Colors.green : Colors.black54,
+                    border: Border.all(color: Colors.white, width: 2),
+                  ),
+                  child: Text(
+                    _otomatik ? 'OTO\nAÇIK' : 'OTO\nKAPALI',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: 110,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Text(
+                  'Çekilen: $_cekimSayisi',
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+              ),
+            ),
+            if (_flas)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(color: Colors.white70),
                 ),
               ),
             Positioned(
