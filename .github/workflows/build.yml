@@ -25,6 +25,12 @@ jobs:
           cd app
           flutter pub add camera
           flutter pub add gal
+          flutter pub add google_mlkit_face_detection
+          flutter pub add dev:flutter_launcher_icons
+          mkdir -p assets
+          cp ../icon.png ../icon_fg.png assets/
+          cp ../flutter_launcher_icons.yaml .
+          dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
           sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <application|' android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="lahza"|android:label="Lahzâ"|' android/app/src/main/AndroidManifest.xml
           flutter build apk --release
