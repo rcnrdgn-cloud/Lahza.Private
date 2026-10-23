@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
@@ -989,31 +990,96 @@ Uint8List? dosyayaEfektUygula(Map<String, dynamic> v) {
   return Uint8List.fromList(imglib.encodeJpg(efektli, quality: 92));
 }
 
-// Her ruh haline uygun görünüm. (Görüntüyü yerinde değiştirir.)
+// Değeri 0-255 aralığına sıkıştırır (taşmayı önler).
+int _sinirla(num v) => v < 0 ? 0 : (v > 255 ? 255 : v.round());
+
+// Her ruh haline uygun görünüm. Tüm hesaplar piksel piksel ve sınırlandırılarak
+// yapılır; böylece koyu bölgeler beyaza, açık bölgeler siyaha "taşmaz".
 imglib.Image efektUygula(imglib.Image im, String kategori) {
+  bool gri = false;
+  double kontrast = 1.0;
+  double doygunluk = 1.0;
+  double parlaklik = 1.0;
+  double dr = 0, dg = 0, db = 0;
+  double vBaslangic = 1.0; // kenar karartmanın başladığı mesafe (0-1)
+  double vMiktar = 0.0; // kenarda ne kadar kararacağı (0-1)
+
   switch (kategori) {
-    case 'Karizmatik':
-      // Siyah-beyaz, yüksek kontrast, kenarları karartılmış
-      imglib.grayscale(im);
-      imglib.adjustColor(im, contrast: 1.35, gamma: 0.95);
-      imglib.vignette(im, start: 0.35, end: 0.95, amount: 0.7);
+    case 'Karizmatik': // siyah-beyaz, güçlü ama yumuşak kontrast, vinyet
+      gri = true;
+      kontrast = 1.25;
+      vBaslangic = 0.55;
+      vMiktar = 0.45;
+      break;
+    case 'Eğlenceli': // canlı ve sıcak
+      doygunluk = 1.3;
+      kontrast = 1.08;
+      parlaklik = 1.04;
+      dr = 8;
+      db = -6;
+      break;
+    case 'Düşünceli': // soluk, serin, hafif vinyet
+      doygunluk = 0.55;
+      kontrast = 0.92;
+      parlaklik = 0.97;
+      dr = -6;
+      db = 8;
+      vBaslangic = 0.6;
+      vMiktar = 0.35;
+      break;
+    case 'Samimi': // sıcak ve yumuşak
+      doygunluk = 1.1;
+      kontrast = 0.95;
+      parlaklik = 1.05;
+      dr = 12;
+      dg = 4;
+      db = -8;
+      break;
+    default:
       return im;
-    case 'Eğlenceli':
-      // Canlı ve sıcak renkler
-      imglib.adjustColor(im, saturation: 1.3, contrast: 1.1, brightness: 1.05);
-      imglib.colorOffset(im, red: 8, blue: -6);
-      return im;
-    case 'Düşünceli':
-      // Soluk, serin tonlar, yumuşak kenar karartma
-      imglib.adjustColor(im, saturation: 0.55, contrast: 0.92, brightness: 0.97);
-      imglib.colorOffset(im, red: -6, blue: 8);
-      imglib.vignette(im, start: 0.4, end: 1.0, amount: 0.5);
-      return im;
-    case 'Samimi':
-      // Sıcak, yumuşak, hafif pembe-altın tonlar
-      imglib.adjustColor(im, saturation: 1.1, contrast: 0.95, brightness: 1.06);
-      imglib.colorOffset(im, red: 12, green: 4, blue: -8);
-      return im;
+  }
+
+  final cx = im.width / 2;
+  final cy = im.height / 2;
+  final enUzak = math.sqrt(cx * cx + cy * cy);
+
+  for (final p in im) {
+    double r = p.r.toDouble() * parlaklik;
+    double g = p.g.toDouble() * parlaklik;
+    double b = p.b.toDouble() * parlaklik;
+
+    final l = 0.299 * r + 0.587 * g + 0.114 * b;
+    if (gri) {
+      r = l;
+      g = l;
+      b = l;
+    } else {
+      r = l + (r - l) * doygunluk;
+      g = l + (g - l) * doygunluk;
+      b = l + (b - l) * doygunluk;
+    }
+
+    r = (r - 128) * kontrast + 128 + dr;
+    g = (g - 128) * kontrast + 128 + dg;
+    b = (b - 128) * kontrast + 128 + db;
+
+    if (vMiktar > 0) {
+      final dx = p.x - cx;
+      final dy = p.y - cy;
+      final d = math.sqrt(dx * dx + dy * dy) / enUzak;
+      if (d > vBaslangic) {
+        var t = (d - vBaslangic) / (1 - vBaslangic);
+        if (t > 1) t = 1;
+        final f = 1 - vMiktar * t * t;
+        r *= f;
+        g *= f;
+        b *= f;
+      }
+    }
+
+    p.r = _sinirla(r);
+    p.g = _sinirla(g);
+    p.b = _sinirla(b);
   }
   return im;
 }
