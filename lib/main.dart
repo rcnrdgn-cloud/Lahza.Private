@@ -54,6 +54,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
   int _yuzSayisi = 0;
   int? _yuzPuani;
   bool _gozKapali = false;
+  String _yuzHata = '';
 
   // Otomatik çekim
   static const int esik = 80;
@@ -75,7 +76,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       kameralar[index],
       ResolutionPreset.high,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.nv21,
+      imageFormatGroup: ImageFormatGroup.yuv420,
     );
     try {
       await kontrol.initialize();
@@ -112,22 +113,45 @@ class _KameraEkraniState extends State<KameraEkrani> {
     super.dispose();
   }
 
-  // ML Kit için kamera karesini dönüştürür (Android, NV21).
+  // Kamera karesini (YUV420, 3 düzlem) ML Kit'in istediği NV21 biçimine çevirir.
+  Uint8List? _nv21Yap(CameraImage img) {
+    if (img.planes.length < 3) return null;
+    final w = img.width;
+    final h = img.height;
+    final out = Uint8List(w * h + (w ~/ 2) * (h ~/ 2) * 2);
+    final yP = img.planes[0];
+    int i = 0;
+    for (int y = 0; y < h; y++) {
+      out.setRange(i, i + w, yP.bytes, y * yP.bytesPerRow);
+      i += w;
+    }
+    final uP = img.planes[1];
+    final vP = img.planes[2];
+    final satir = uP.bytesPerRow;
+    final adim = uP.bytesPerPixel ?? 1;
+    for (int y = 0; y < h ~/ 2; y++) {
+      for (int x = 0; x < w ~/ 2; x++) {
+        final idx = y * satir + x * adim;
+        out[i++] = vP.bytes[idx];
+        out[i++] = uP.bytes[idx];
+      }
+    }
+    return out;
+  }
+
   InputImage? _girdiOlustur(CameraImage img) {
     final rotasyon = InputImageRotationValue.fromRawValue(
         kameralar[_kameraIndex].sensorOrientation);
     if (rotasyon == null) return null;
-    final format = InputImageFormatValue.fromRawValue(img.format.raw);
-    if (format == null || format != InputImageFormat.nv21) return null;
-    if (img.planes.length != 1) return null;
-    final plane = img.planes.first;
+    final veri = _nv21Yap(img);
+    if (veri == null) return null;
     return InputImage.fromBytes(
-      bytes: plane.bytes,
+      bytes: veri,
       metadata: InputImageMetadata(
         size: Size(img.width.toDouble(), img.height.toDouble()),
         rotation: rotasyon,
-        format: format,
-        bytesPerRow: plane.bytesPerRow,
+        format: InputImageFormat.nv21,
+        bytesPerRow: img.width,
       ),
     );
   }
@@ -159,7 +183,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
           _gozKapali = kapali;
         });
       }
-    } catch (_) {
+      if (_yuzHata.isNotEmpty && mounted) setState(() => _yuzHata = '');
+    } catch (e) {
+      if (mounted) setState(() => _yuzHata = e.toString());
     } finally {
       _yuzIsleniyor = false;
     }
@@ -398,6 +424,12 @@ class _KameraEkraniState extends State<KameraEkrani> {
                     'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
                     style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
+                  if (_yuzHata.isNotEmpty)
+                    Text(
+                      'yüz hatası: $_yuzHata',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.orangeAccent, fontSize: 11),
+                    ),
                 ],
               ),
             ),
