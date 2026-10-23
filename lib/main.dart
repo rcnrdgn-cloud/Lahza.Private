@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
@@ -26,10 +27,15 @@ class _KameraEkraniState extends State<KameraEkrani> {
   bool _cekiliyor = false;
   bool _isleniyor = false;
   int _kareSayaci = 0;
+  Uint8List? _oncekiKare;
+
   int _isikPuani = 0;
   int _netlikPuani = 0;
+  int _sabitlikPuani = 0;
+  int _toplamPuan = 0;
   double _hamParlaklik = 0;
   double _hamNetlik = 0;
+  double _hamHareket = 0;
 
   @override
   void initState() {
@@ -55,7 +61,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     super.dispose();
   }
 
-  // Her 5 karede bir parlaklık ve netlik ölçer.
+  // Her 5 karede bir ışık, netlik ve sabitlik ölçer.
   void _analiz(CameraImage img) {
     _kareSayaci++;
     if (_isleniyor || _kareSayaci % 5 != 0) return;
@@ -66,30 +72,68 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final satir = plane.bytesPerRow;
       final w = img.width;
       final h = img.height;
+
+      // 1) Parlaklık + hareket için küçük örnek (tüm kare, 8 pikselde bir)
+      final kucuk = Uint8List(((h + 7) ~/ 8) * ((w + 7) ~/ 8));
       int toplam = 0;
-      int fark = 0;
-      int adet = 0;
-      for (int y = 0; y < h - 1; y += 4) {
+      int k = 0;
+      for (int y = 0; y < h; y += 8) {
         final o = y * satir;
-        for (int x = 0; x < w - 1; x += 4) {
+        for (int x = 0; x < w; x += 8) {
           final v = b[o + x];
           toplam += v;
-          fark += (v - b[o + x + 1]).abs() + (v - b[o + satir + x]).abs();
-          adet++;
+          kucuk[k++] = v;
         }
       }
-      if (adet == 0) return;
-      final parlaklik = toplam / adet;
-      final netlik = fark / adet;
+      if (k == 0) return;
+      final parlaklik = toplam / k;
+
+      // 2) Hareket: önceki örnekle karşılaştır
+      double hareket = 0;
+      final onceki = _oncekiKare;
+      if (onceki != null && onceki.length == kucuk.length) {
+        int fark = 0;
+        for (int i = 0; i < kucuk.length; i++) {
+          fark += (kucuk[i] - onceki[i]).abs();
+        }
+        hareket = fark / kucuk.length;
+      }
+      _oncekiKare = kucuk;
+
+      // 3) Netlik: sadece merkez bölge (%60)
+      final x0 = (w * 0.2).toInt();
+      final x1 = (w * 0.8).toInt();
+      final y0 = (h * 0.2).toInt();
+      final y1 = (h * 0.8).toInt();
+      int kenar = 0;
+      int kAdet = 0;
+      for (int y = y0; y < y1; y += 4) {
+        final o = y * satir;
+        for (int x = x0; x < x1; x += 4) {
+          final v = b[o + x];
+          kenar += (v - b[o + x + 1]).abs() + (v - b[o + satir + x]).abs();
+          kAdet++;
+        }
+      }
+      final netlik = kAdet == 0 ? 0.0 : kenar / kAdet;
+
+      // Puanlar (0-100)
       final isik =
           (100 - ((parlaklik - 130).abs() / 130 * 100)).clamp(0, 100).round();
-      final net = ((netlik - 2) * 8).clamp(0, 100).round();
+      final net = (netlik / 35 * 100).clamp(0, 100).round();
+      final sabit = (100 - (hareket - 2) * 8).clamp(0, 100).round();
+      var t = isik * 0.3 + net * 0.3 + sabit * 0.4;
+      if (sabit < 50) t = t * 0.5;
+
       if (mounted) {
         setState(() {
           _isikPuani = isik;
           _netlikPuani = net;
+          _sabitlikPuani = sabit;
+          _toplamPuan = t.round();
           _hamParlaklik = parlaklik;
           _hamNetlik = netlik;
+          _hamHareket = hareket;
         });
       }
     } finally {
@@ -104,6 +148,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       await _kontrol!.stopImageStream();
       final foto = await _kontrol!.takePicture();
       setState(() => _sonFoto = foto.path);
+      _oncekiKare = null;
       await _kontrol!.startImageStream(_analiz);
     } finally {
       _cekiliyor = false;
@@ -115,7 +160,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
         ? Colors.green
         : (puan >= 40 ? Colors.orange : Colors.red);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
         color: renk.withAlpha(220),
         borderRadius: BorderRadius.circular(20),
@@ -123,7 +168,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       child: Text(
         '$ad $puan',
         style: const TextStyle(
-            color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+            color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
       ),
     );
   }
@@ -138,7 +183,6 @@ class _KameraEkraniState extends State<KameraEkrani> {
         body: Center(child: CircularProgressIndicator()),
       );
     }
-    final toplamPuan = ((_isikPuani + _netlikPuani) / 2).round();
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
@@ -146,29 +190,28 @@ class _KameraEkraniState extends State<KameraEkrani> {
           children: [
             Center(child: CameraPreview(_kontrol!)),
             Positioned(
-              top: 12,
-              left: 0,
-              right: 0,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+              top: 10,
+              left: 8,
+              right: 8,
+              child: Column(
                 children: [
-                  _rozet('Işık', _isikPuani),
-                  const SizedBox(width: 8),
-                  _rozet('Netlik', _netlikPuani),
-                  const SizedBox(width: 8),
-                  _rozet('Toplam', toplamPuan),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      _rozet('Işık', _isikPuani),
+                      _rozet('Netlik', _netlikPuani),
+                      _rozet('Sabitlik', _sabitlikPuani),
+                      _rozet('Toplam', _toplamPuan),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
                 ],
-              ),
-            ),
-            Positioned(
-              top: 52,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Text(
-                  'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)}',
-                  style: const TextStyle(color: Colors.white70, fontSize: 12),
-                ),
               ),
             ),
             if (_sonFoto != null)
