@@ -708,6 +708,7 @@ class _KameraEkraniState extends State<KameraEkrani>
           kategori: _efektKategorisi(),
           etiketler: Map<String, int>.from(_kategoriler),
           teknik: List<String>.from(_teknik),
+          yuzVar: _yuzSayisi > 0,
         ));
         if (_tampon.length > tamponBoyu) _tampon.removeAt(0);
       }
@@ -1059,15 +1060,22 @@ class _KameraEkraniState extends State<KameraEkrani>
         'uvAdim': enIyi.uvAdim,
         'donus': _bekleyenDonus,
         'kategori': enIyi.kategori,
+        'yuz': enIyi.yuzVar,
       });
-      final jpeg = sonuc[0];
+      final Uint8List jpeg = sonuc['orijinal'];
       if (!await Gal.hasAccess()) {
         await Gal.requestAccess();
       }
-      // Orijinal her zaman 'Lahza' albümüne, efektli kopya kategori albümüne
+      // Orijinal her zaman 'Lahza' albümüne, ruh hali efektli kopya kategori
+      // albümüne, film/renk görünümlü kopya o görünümün albümüne
       await Gal.putImageBytes(jpeg, album: 'Lahza');
-      if (sonuc.length > 1 && enIyi.kategori != null) {
-        await Gal.putImageBytes(sonuc[1], album: 'Lahza - ${enIyi.kategori}');
+      if (sonuc['efektli'] != null) {
+        await Gal.putImageBytes(sonuc['efektli'],
+            album: 'Lahza - ${enIyi.kategori}');
+      }
+      if (sonuc['film'] != null) {
+        await Gal.putImageBytes(sonuc['film'],
+            album: 'Lahza - ${sonuc['filmAdi']}');
       }
       await _arsiveEkle(jpeg, enIyi.etiketler, enIyi.teknik, enIyi.kategori);
       final dosya = File(
@@ -1086,6 +1094,7 @@ class _KameraEkraniState extends State<KameraEkrani>
     if (_cekiliyor || kontrol == null) return;
     _cekiliyor = true;
     final kategori = _efektKategorisi();
+    final yuzVar = _yuzSayisi > 0;
     final etiketAni = Map<String, int>.from(_kategoriler);
     final teknikAni = List<String>.from(_teknik);
     try {
@@ -1107,11 +1116,16 @@ class _KameraEkraniState extends State<KameraEkrani>
         await Gal.putImage(foto.path, album: 'Lahza');
         await _arsiveEkle(
             await File(foto.path).readAsBytes(), etiketAni, teknikAni, kategori);
-        if (kategori != null) {
-          final efektli = await compute(
-              dosyayaEfektUygula, {'yol': foto.path, 'kategori': kategori});
-          if (efektli != null) {
-            await Gal.putImageBytes(efektli, album: 'Lahza - $kategori');
+        final kopyalar = await compute(dosyayaEfektUygula,
+            {'yol': foto.path, 'kategori': kategori, 'yuz': yuzVar});
+        if (kopyalar != null) {
+          if (kopyalar['efektli'] != null) {
+            await Gal.putImageBytes(kopyalar['efektli'],
+                album: 'Lahza - $kategori');
+          }
+          if (kopyalar['film'] != null) {
+            await Gal.putImageBytes(kopyalar['film'],
+                album: 'Lahza - ${kopyalar['filmAdi']}');
           }
         }
       } catch (_) {}
@@ -1661,6 +1675,7 @@ class _Kare {
   final String? kategori;
   final Map<String, int> etiketler;
   final List<String> teknik;
+  final bool yuzVar;
   _Kare({
     required this.y,
     required this.u,
@@ -1674,11 +1689,13 @@ class _Kare {
     required this.kategori,
     required this.etiketler,
     required this.teknik,
+    required this.yuzVar,
   });
 }
 
-// YUV420 kareyi döndürülmüş JPEG'e çevirir (arka planda, ayrı iş parçacığında çalışır).
-List<Uint8List> kareyiJpegYap(Map<String, dynamic> v) {
+// YUV420 kareyi döndürülmüş JPEG'e çevirir; ruh hali efektli ve film/renk
+// görünümlü kopyaları da üretir (arka planda, ayrı iş parçacığında çalışır).
+Map<String, dynamic> kareyiJpegYap(Map<String, dynamic> v) {
   final Uint8List yb = v['y'];
   final Uint8List ub = v['u'];
   final Uint8List vb = v['v'];
@@ -1708,22 +1725,95 @@ List<Uint8List> kareyiJpegYap(Map<String, dynamic> v) {
     }
   }
   final sonuc = donus == 0 ? im : imglib.copyRotate(im, angle: donus);
-  final orijinal = Uint8List.fromList(imglib.encodeJpg(sonuc, quality: 92));
-  if (kategori == null) return [orijinal];
-  final efektli = efektUygula(sonuc, kategori);
-  return [orijinal, Uint8List.fromList(imglib.encodeJpg(efektli, quality: 92))];
+  return _kopyalariUret(sonuc, kategori, v['yuz'] == true, true);
 }
 
-// Tam çözünürlüklü bir fotoğraf dosyasına kategori efektini uygular.
-Uint8List? dosyayaEfektUygula(Map<String, dynamic> v) {
+// Tam çözünürlüklü bir fotoğraf dosyasından efektli ve film kopyalarını üretir
+// (orijinal zaten kaydedildiği için yeniden kodlanmaz).
+Map<String, dynamic>? dosyayaEfektUygula(Map<String, dynamic> v) {
   final String yol = v['yol'];
-  final String kategori = v['kategori'];
+  final String? kategori = v['kategori'];
   final veri = File(yol).readAsBytesSync();
   final im = imglib.decodeJpg(veri);
   if (im == null) return null;
   final duz = imglib.bakeOrientation(im);
-  final efektli = efektUygula(duz, kategori);
-  return Uint8List.fromList(imglib.encodeJpg(efektli, quality: 92));
+  return _kopyalariUret(duz, kategori, v['yuz'] == true, false);
+}
+
+// 'orijinal', 'efektli' (ruh hali) ve 'film' + 'filmAdi' (uygun film/renk
+// görünümü) anahtarlı JPEG'ler. Olmayan kopya haritada yer almaz.
+Map<String, dynamic> _kopyalariUret(
+    imglib.Image im, String? kategori, bool yuzVar, bool orijinalDahil) {
+  Uint8List jpg(imglib.Image x) =>
+      Uint8List.fromList(imglib.encodeJpg(x, quality: 92));
+  final sonuc = <String, dynamic>{};
+  if (orijinalDahil) sonuc['orijinal'] = jpg(im);
+  final film = filmSec(im, kategori, yuzVar);
+  if (film != null) {
+    // efektUygula görüntüyü yerinde değiştirir; film kopyası ayrı bir kopyadan
+    sonuc['film'] = jpg(efektUygula(imglib.Image.from(im), film));
+    sonuc['filmAdi'] = film;
+  }
+  if (kategori != null) sonuc['efektli'] = jpg(efektUygula(im, kategori));
+  return sonuc;
+}
+
+// Fotoğrafa uygun film simülasyonunu ya da renk derecelendirmesini seçer.
+// Yüz varsa ruh haline, yoksa sahnenin kendisine (ışık, renk, yeşillik,
+// gökyüzü) bakar. Ara Güler modunda renkli film uygulanmaz.
+String? filmSec(imglib.Image im, String? kategori, bool yuzVar) {
+  if (kategori == 'Ara Güler') return null;
+  double topL = 0, topDoy = 0, topSicak = 0;
+  int n = 0, yesil = 0, gok = 0, sicak = 0;
+  for (int y = 0; y < im.height; y += 8) {
+    for (int x = 0; x < im.width; x += 8) {
+      final p = im.getPixel(x, y);
+      final r = p.r.toDouble();
+      final g = p.g.toDouble();
+      final b = p.b.toDouble();
+      final l = 0.299 * r + 0.587 * g + 0.114 * b;
+      final enb = math.max(r, math.max(g, b));
+      final enk = math.min(r, math.min(g, b));
+      topL += l;
+      topDoy += enb <= 0 ? 0.0 : (enb - enk) / enb;
+      topSicak += r - b;
+      if (g > r + 10 && g > b + 10) yesil++;
+      if (b > r + 15 && l > 110) gok++;
+      if (r > b + 35 && l > 60) sicak++;
+      n++;
+    }
+  }
+  if (n == 0) return null;
+  final ortL = topL / n;
+  final ortDoy = topDoy / n;
+  final ortSicak = topSicak / n;
+
+  // Gece / loş yapay ışık: tungsten sinema filmi
+  if (ortL < 70) return 'CineStill 800T';
+  if (yuzVar) {
+    switch (kategori) {
+      case 'Eğlenceli':
+        return 'Gold 200'; // nostaljik eğlence, eski albüm havası
+      case 'Enerjik':
+      case 'Karizmatik':
+      case 'Şaşkın':
+        return 'Sinematik'; // turkuaz-turuncu, film karesi gibi
+      case 'Komik':
+        return 'Ektachrome'; // canlı, doygun
+      case 'Cool':
+      case 'Düşünceli':
+        return 'Pro 400H'; // serin, ferah
+      case 'Gizemli':
+        return 'CineStill 800T'; // gece sineması
+      default:
+        return 'Portra 400'; // Samimi, Neşeli, Muzip ve diğer portreler
+    }
+  }
+  if (yesil / n > 0.3) return 'Pro 400H'; // doğa, yeşillik
+  if (gok / n > 0.15 && sicak / n > 0.12) return 'Sinematik'; // gök + sıcak ışık
+  if (ortSicak > 25 && ortL > 120) return 'Gold 200'; // güneşli, sıcak sahne
+  if (ortDoy > 0.35) return 'Ektachrome'; // renkli sahne
+  return 'Portra 400';
 }
 
 // Değeri 0-255 aralığına sıkıştırır (taşmayı önler).
@@ -1749,6 +1839,12 @@ class _Gorunum {
   final double vBaslangic; // kenar karartmanın başladığı mesafe (0-1)
   final double vMiktar; // kenarda ne kadar kararacağı (0-1)
   final double gren; // film greni miktarı
+  // Renk derecelendirmesi (lift / gamma / gain), kanal başına (r, g, b).
+  // Film görünümlerinin asıl kaynağı: her film rengi tonlara göre farklı kaydırır.
+  final List<double> kaldirma; // gölgeler: + kaldırır, - bastırır (0 = yok)
+  final List<double> gama; // orta tonlar: >1 açar, <1 koyulaştırır
+  final List<double> kazanc; // parlak tonlar: >1 artırır, <1 azaltır
+  final double halasyon; // parlak ışık çevresinde kırmızımsı hale (sinema filmi)
   const _Gorunum({
     this.gri = false,
     this.pozlama = 1.0,
@@ -1764,6 +1860,10 @@ class _Gorunum {
     this.vBaslangic = 1.0,
     this.vMiktar = 0,
     this.gren = 0,
+    this.kaldirma = const [0, 0, 0],
+    this.gama = const [1, 1, 1],
+    this.kazanc = const [1, 1, 1],
+    this.halasyon = 0,
   });
 }
 
@@ -1909,6 +2009,105 @@ const Map<String, _Gorunum> gorunumler = {
     vMiktar: 0.4,
     gren: 14,
   ),
+  // ---- Film simülasyonları ve renk derecelendirmesi ----
+  // Ruh hali efektinden ayrı, fotoğrafa uygun olan seçilip ikinci bir kopya
+  // olarak kaydedilir (bkz. filmSec).
+
+  // Portre filmi (Kodak Portra 400 tarzı): sıcak, doğal ten; yumuşak kontrast,
+  // hafif kalkık sıcak gölgeler, pastel renkler, ince gren
+  'Portra 400': _Gorunum(
+    pozlama: 1.03,
+    egri: 0.15,
+    doygunluk: 0.92,
+    canlilik: 0.1,
+    kaldirma: [0.03, 0.025, 0.015],
+    gama: [1.02, 1.0, 0.97],
+    kazanc: [1.0, 0.99, 0.95],
+    golge: [2, 2, -2],
+    isik: [6, 3, -4],
+    netlik: -0.05,
+    soluk: 6,
+    tepe: 246,
+    gren: 6,
+  ),
+  // Nostaljik tüketici filmi (Kodak Gold 200 tarzı): sarıya kaçan sıcaklık,
+  // doygun renkler, kalkık siyahlar, belirgin gren, hafif vinyet — 90'lar albümü
+  'Gold 200': _Gorunum(
+    pozlama: 1.04,
+    egri: 0.3,
+    doygunluk: 1.12,
+    canlilik: 0.2,
+    kaldirma: [0.03, 0.02, 0.0],
+    gama: [1.03, 1.02, 0.94],
+    kazanc: [1.02, 1.0, 0.9],
+    isik: [10, 8, -8],
+    soluk: 8,
+    tepe: 244,
+    vBaslangic: 0.6,
+    vMiktar: 0.3,
+    gren: 10,
+  ),
+  // Fuji tarzı (Pro 400H): serin, ferah; gölgelerde camgöbeği-yeşil, açık
+  // pozlanmış pastel görünüm; doğa ve yeşillikte güzel
+  'Pro 400H': _Gorunum(
+    pozlama: 1.05,
+    egri: 0.12,
+    doygunluk: 0.9,
+    kaldirma: [0.0, 0.03, 0.04],
+    gama: [0.98, 1.02, 1.02],
+    kazanc: [0.98, 1.0, 1.0],
+    golge: [-3, 4, 6],
+    isik: [2, 3, 2],
+    soluk: 12,
+    tepe: 245,
+    gren: 6,
+  ),
+  // Dia filmi (Ektachrome tarzı): canlı, doygun, derin siyahlar, temiz serin
+  // beyazlar; renkli sahnelerde
+  'Ektachrome': _Gorunum(
+    egri: 0.55,
+    doygunluk: 1.3,
+    canlilik: 0.2,
+    kaldirma: [-0.02, -0.01, 0.0],
+    gama: [0.98, 1.0, 1.04],
+    kazanc: [1.0, 1.0, 1.03],
+    golge: [-2, 0, 6],
+    netlik: 0.15,
+    vBaslangic: 0.6,
+    vMiktar: 0.25,
+    gren: 3,
+  ),
+  // Tungsten sinema filmi (CineStill 800T tarzı): gece ve yapay ışık için;
+  // serin genel ton, ışıkların çevresinde kırmızı hale, iri gren
+  'CineStill 800T': _Gorunum(
+    pozlama: 1.05,
+    egri: 0.35,
+    doygunluk: 1.05,
+    kaldirma: [0.0, 0.02, 0.05],
+    gama: [0.95, 1.0, 1.08],
+    kazanc: [0.97, 1.0, 1.06],
+    golge: [-4, 2, 10],
+    isik: [6, 2, -2],
+    halasyon: 0.5,
+    soluk: 6,
+    gren: 14,
+  ),
+  // Sinematik renk derecelendirmesi (turkuaz-turuncu): gölgeler turkuaza,
+  // ten ve parlak tonlar turuncuya; zıt renkler konuyu öne çıkarır
+  'Sinematik': _Gorunum(
+    egri: 0.45,
+    doygunluk: 1.05,
+    canlilik: 0.15,
+    kaldirma: [-0.02, 0.03, 0.06],
+    gama: [1.02, 1.0, 0.98],
+    kazanc: [1.04, 1.0, 0.94],
+    golge: [-16, 6, 22],
+    isik: [16, 6, -10],
+    netlik: 0.15,
+    vBaslangic: 0.55,
+    vMiktar: 0.3,
+    gren: 3,
+  ),
   // Eski sürümlerden kalan kategori: soluk, serin, hafif vinyet
   'Düşünceli': _Gorunum(
     pozlama: 0.97,
@@ -1932,12 +2131,17 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
   final w = im.width;
   final h = im.height;
 
-  // S-eğrisi tablosu: değer -> eğrilmiş değer
-  final egri = Float64List(256);
+  // Kanal başına ton tablosu: önce S-eğrisi, sonra lift / gamma / gain
+  final egri = List.generate(3, (_) => Float64List(256));
   for (int i = 0; i < 256; i++) {
     final v = i / 255;
     final yumusak = v * v * (3 - 2 * v);
-    egri[i] = (v + (yumusak - v) * gr.egri) * 255;
+    final s = v + (yumusak - v) * gr.egri;
+    for (int c = 0; c < 3; c++) {
+      var t = (s + gr.kaldirma[c] * (1 - s)) * gr.kazanc[c];
+      t = t <= 0 ? 0.0 : math.pow(t, 1 / gr.gama[c]).toDouble();
+      egri[c][i] = t * 255;
+    }
   }
 
   // Netlik ve ışıma için görüntünün küçültülüp bulanıklaştırılmış kopyası.
@@ -1945,7 +2149,7 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
   const olcek = 8;
   Float32List? bulanik;
   int kw = 0, kh = 0;
-  if (gr.netlik != 0 || gr.parlama > 0) {
+  if (gr.netlik != 0 || gr.parlama > 0 || gr.halasyon > 0) {
     final kucuk = imglib.copyResize(im,
         width: math.max(1, w ~/ olcek),
         height: math.max(1, h ~/ olcek),
@@ -2015,9 +2219,9 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
     }
 
     // Tonal eğri
-    r = egri[_sinirla(r)];
-    g = egri[_sinirla(g)];
-    b = egri[_sinirla(b)];
+    r = egri[0][_sinirla(r)];
+    g = egri[1][_sinirla(g)];
+    b = egri[2][_sinirla(b)];
 
     // Doygunluk + canlılık
     if (!gr.gri) {
@@ -2046,6 +2250,15 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
       r = 255 - (255 - _aralikta(r, 0, 255)) * (1 - br[0] / 255 * maske);
       g = 255 - (255 - _aralikta(g, 0, 255)) * (1 - br[1] / 255 * maske);
       b = 255 - (255 - _aralikta(b, 0, 255)) * (1 - br[2] / 255 * maske);
+    }
+
+    // Halasyon: sinema filminde parlak ışığın film tabanından yansıyıp
+    // çevresinde bıraktığı kırmızı-turuncu hale
+    if (gr.halasyon > 0) {
+      final bl = (0.299 * br[0] + 0.587 * br[1] + 0.114 * br[2]) / 255;
+      final hale = _aralikta((bl - 0.6) / 0.4, 0, 1) * gr.halasyon;
+      r += 90 * hale;
+      g += 25 * hale;
     }
 
     // Mat siyahlar ve yumuşatılmış beyazlar
