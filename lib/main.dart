@@ -113,6 +113,13 @@ class _KameraEkraniState extends State<KameraEkrani> {
   Rect? _anaYuz; // en büyük yüz, dik (ekranda görünen) görüntü koordinatlarında
   Size _dikBoyut = Size.zero;
   int _grupUyumu = 100; // gözü açık ve kameraya dönük kişilerin oranı
+  double _anaYaw = 0; // ana yüzün sağa-sola dönüşü (derece, mutlak)
+  double _anaEgim = 0; // ana yüzün yukarı(+)/aşağı(-) eğimi (derece)
+  double _etkilesim = 0; // iki kişi birbirine yakın ve dönük mü (0-1)
+
+  // Ara Güler modu: poz değil hayat, insan yaşadığı yerle birlikte, belgesel
+  // siyah-beyaz. Kendini "görsel tarihçi" sayan fotoğrafçının yaklaşımı.
+  bool _guler = false;
   double _egimSapma = 0; // telefonun yataydan sapması (derece)
   StreamSubscription<AccelerometerEvent>? _ivmeAbone;
   // Telefonun dönme hızı (rad/sn, yumuşatılmış). Bulanıklığı yapan şey kameranın
@@ -269,6 +276,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       Rect? anaYuz;
       Size dikBoyut = Size.zero;
       int grupUyumu = 100;
+      double anaYaw = 0, anaEgim = 0, etkilesim = 0;
       if (yuzler.isNotEmpty) {
         final a = yuzler.first;
         final n = yuzler.length;
@@ -356,6 +364,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
           final donuk =
               ((b2.headEulerAngleY ?? 0).abs() > 15 && yaw > 15) ? 1.0 : 0.0;
           samimi = yakin * 0.45 + ((s + s2) / 2) * 0.35 + donuk * 0.2;
+          etkilesim = kirp(yakin * 0.5 + donuk * 0.5);
         } else {
           // Tek kişide: yumuşak, doğal tebessüm
           samimi = kirp(1 - (s - 0.5).abs() * 3) * 0.55;
@@ -414,6 +423,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
           }
         }
         grupUyumu = (uyumlu * 100 / n).round();
+        anaYaw = yaw;
+        anaEgim = egim;
 
         ham = 'dönüş ${yaw.toStringAsFixed(0)}° · eğim ${egim.toStringAsFixed(0)}° · yatık ${yatik.toStringAsFixed(0)}° · gülüş ${(s * 100).round()} · göz ${(g * 100).round()} · ağız ${(agiz * 100).round()} · çarpık ${(carpik * 100).round()}';
       }
@@ -440,6 +451,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
           _anaYuz = anaYuz;
           _dikBoyut = dikBoyut;
           _grupUyumu = grupUyumu;
+          _anaYaw = anaYaw;
+          _anaEgim = anaEgim;
+          _etkilesim = etkilesim;
           if (_yuzHata.startsWith('PlatformException')) _yuzHata = '';
         });
       }
@@ -632,6 +646,10 @@ class _KameraEkraniState extends State<KameraEkrani> {
         degerlendirme =
             _fotografciGozu(b, satir, w, h, parlaklik, netlik, sabit);
         t = degerlendirme.puan.toDouble();
+      } else if (_guler) {
+        // Ara Güler: insan yoksa fotoğraf da yok
+        t = 0;
+        degerlendirme.ipucu = 'İnsan yoksa fotoğraf yok — hayatın içine bak';
       }
 
       if (mounted) {
@@ -660,9 +678,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
           uvSatir: img.planes[1].bytesPerRow,
           uvAdim: img.planes[1].bytesPerPixel ?? 1,
           puan: tr,
-          kategori: (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
-              ? _baskin
-              : null,
+          kategori: _efektKategorisi(),
           etiketler: Map<String, int>.from(_kategoriler),
           teknik: List<String>.from(_teknik),
         ));
@@ -687,6 +703,15 @@ class _KameraEkraniState extends State<KameraEkrani> {
     } finally {
       _isleniyor = false;
     }
+  }
+
+  // Kaydedilecek efektli kopyanın görünümü: Ara Güler modunda her zaman
+  // belgesel siyah-beyaz, aksi halde yeterince güçlü baskın ruh hali.
+  String? _efektKategorisi() {
+    if (_guler) return _yuzSayisi > 0 ? 'Ara Güler' : null;
+    return (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
+        ? _baskin
+        : null;
   }
 
   // Dik (ekranda görünen) görüntüdeki bir noktayı ham sensör karesine çevirir.
@@ -795,6 +820,13 @@ class _KameraEkraniState extends State<KameraEkrani> {
     double an = _baskinPuan * (_yuzSayisi >= 2 ? _grupUyumu / 100 : 1.0);
     if (gozSorun) an *= 0.3;
 
+    d.ham =
+        'yüz ışığı ${yl.toStringAsFixed(0)} · ışık oranı ${oran.toStringAsFixed(2)} · yüz kenar ${yk.toStringAsFixed(1)} · telefon eğimi ${_egimSapma.toStringAsFixed(1)}°';
+    if (_guler) {
+      return _gulerGozu(d, yl, yk, oran, yuzGen, kenardaKesik, yamuk,
+          gozSorun, sabit);
+    }
+
     double puan = _aralikta(komp, 0, 100) * 0.25 +
         _aralikta(isik, 0, 100) * 0.2 +
         _aralikta(yuzNet, 0, 100) * 0.2 +
@@ -808,8 +840,6 @@ class _KameraEkraniState extends State<KameraEkrani> {
     d.ayrisma = _aralikta(ayrisma, 0, 100).round();
     d.an = _aralikta(an, 0, 100).round();
     d.puan = puan.round();
-    d.ham =
-        'yüz ışığı ${yl.toStringAsFixed(0)} · ışık oranı ${oran.toStringAsFixed(2)} · yüz kenar ${yk.toStringAsFixed(1)} · telefon eğimi ${_egimSapma.toStringAsFixed(1)}°';
 
     // En önemli sorundan başlayarak tek bir ipucu. Kesik yüz, kapalı göz ve
     // sarsıntı fotoğrafı bozar; geri kalanlar puan eşiği aşıldıysa ince ayardır
@@ -844,6 +874,81 @@ class _KameraEkraniState extends State<KameraEkrani> {
       d.ipucu = 'Konuyu üçte bir çizgisine ya da ortaya al';
     } else if (an < 50) {
       d.ipucu = 'Kadraj hazır — anı bekle';
+    }
+    return d;
+  }
+
+  // Ara Güler'in gözüyle puanlama. Kendini sanatçı değil "görsel tarihçi" ve
+  // foto muhabiri sayardı: poz verdirmez, insanları onu fark etmedikleri anda,
+  // yaşadıkları yerle birlikte çekerdi. Burada kural kitabı kompozisyon değil;
+  // kendiliğindenlik, bağlam ve anın anlamı öne geçer.
+  _Degerlendirme _gulerGozu(_Degerlendirme d, double yl, double yk,
+      double oran, double yuzGen, bool kenardaKesik, bool yamuk,
+      bool gozSorun, int sabit) {
+    final onden =
+        kameralar[_kameraIndex].lensDirection == CameraLensDirection.front;
+
+    // Kendiliğindenlik: kameraya dönük bakış poz demektir; yana ya da aşağı
+    // bakan, işine dalmış insan kendiliğindendir. Selfie doğası gereği pozdur.
+    double kendi = math.max(_aralikta((_anaYaw - 8) / 20, 0, 1),
+        _aralikta((-_anaEgim - 8) / 15, 0, 1));
+    if (onden) kendi *= 0.5;
+
+    // Bağlam: yüz kadrajı doldurmasın; insan yaşadığı yerle birlikte görünsün
+    double baglam = yuzGen <= 0.22
+        ? _aralikta(yuzGen / 0.06, 0.4, 1)
+        : _aralikta(1 - (yuzGen - 0.22) / 0.3, 0.2, 1);
+    if (_tamBoy) baglam = math.min(1.0, baglam + 0.2);
+    if (_yuzSayisi >= 2) baglam = math.min(1.0, baglam + 0.1);
+
+    // Anın anlamı: güçlü bir ifade (hüzün, ciddiyet de olur) ya da insanlar
+    // arasındaki etkileşim. Gülümseme şart değil.
+    double anlam = math.max(_baskinPuan.toDouble(), _etkilesim * 100);
+    if (gozSorun) anlam *= 0.3;
+
+    // Işık: dramatik, yandan gelen ışık makbul; kusur yalnızca yüzün karanlıkta
+    // kaybolması ya da patlaması
+    double isik =
+        90 - math.max(0.0, 45 - yl) * 2 - math.max(0.0, yl - 215) * 2.5;
+    if (oran > 1.3 && oran < 3.5) isik += 10;
+
+    final net = _aralikta((yk - 2) / 6 * 100, 0, 100);
+
+    double puan = kendi * 100 * 0.3 +
+        _aralikta(anlam, 0, 100) * 0.25 +
+        baglam * 100 * 0.2 +
+        _aralikta(isik, 0, 100) * 0.15 +
+        net * 0.1;
+    if (kenardaKesik) puan *= 0.6;
+    if (yamuk) puan -= (_egimSapma - 2) * 1.5;
+    if (sabit < 50) puan *= 0.6;
+    puan = _aralikta(puan, 0, 100);
+
+    d.kendiligindenlik = (kendi * 100).round();
+    d.baglam = (baglam * 100).round();
+    d.yuzIsigi = _aralikta(isik, 0, 100).round();
+    d.yuzNetligi = net.round();
+    d.an = _aralikta(anlam, 0, 100).round();
+    d.puan = puan.round();
+
+    if (kenardaKesik) {
+      d.ipucu = 'Yüz kadrajdan taşıyor — biraz geri çekil';
+    } else if (gozSorun) {
+      d.ipucu = 'Gözler kapalı';
+    } else if (sabit < 50) {
+      d.ipucu = 'Telefonu sabit tut';
+    } else if (d.puan >= esik) {
+      d.ipucu = '✓ İşte bu an';
+    } else if (kendi < 0.4) {
+      d.ipucu = onden
+          ? 'Ara Güler poz istemezdi — arka kamerayla hayata bak'
+          : 'Poz değil hayat — fark edilmeden bekle';
+    } else if (yuzGen > 0.4) {
+      d.ipucu = 'Geri çekil — insanı yaşadığı yerle göster';
+    } else if (yl < 45) {
+      d.ipucu = 'Yüz karanlıkta kayboluyor';
+    } else if (anlam < 50) {
+      d.ipucu = 'Anı bekle';
     }
     return d;
   }
@@ -927,9 +1032,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     final kontrol = _kontrol;
     if (_cekiliyor || kontrol == null) return;
     _cekiliyor = true;
-    final kategori = (_yuzSayisi > 0 && _baskin != null && _baskinPuan >= 60)
-        ? _baskin
-        : null;
+    final kategori = _efektKategorisi();
     final etiketAni = Map<String, int>.from(_kategoriler);
     final teknikAni = List<String>.from(_teknik);
     try {
@@ -1124,13 +1227,22 @@ class _KameraEkraniState extends State<KameraEkrani> {
                       alignment: WrapAlignment.center,
                       spacing: 6,
                       runSpacing: 6,
-                      children: [
-                        _rozet('Kompozisyon', _degerlendirme.kompozisyon),
-                        _rozet('Yüz ışığı', _degerlendirme.yuzIsigi),
-                        _rozet('Yüz netliği', _degerlendirme.yuzNetligi),
-                        _rozet('Ayrışma', _degerlendirme.ayrisma),
-                        _rozet('An', _degerlendirme.an),
-                      ],
+                      children: _guler
+                          ? [
+                              _rozet('Kendiliğindenlik',
+                                  _degerlendirme.kendiligindenlik),
+                              _rozet('Bağlam', _degerlendirme.baglam),
+                              _rozet('Yüz ışığı', _degerlendirme.yuzIsigi),
+                              _rozet('Yüz netliği', _degerlendirme.yuzNetligi),
+                              _rozet('An', _degerlendirme.an),
+                            ]
+                          : [
+                              _rozet('Kompozisyon', _degerlendirme.kompozisyon),
+                              _rozet('Yüz ışığı', _degerlendirme.yuzIsigi),
+                              _rozet('Yüz netliği', _degerlendirme.yuzNetligi),
+                              _rozet('Ayrışma', _degerlendirme.ayrisma),
+                              _rozet('An', _degerlendirme.an),
+                            ],
                     ),
                   if (_ayrinti) const SizedBox(height: 6),
                   if (_ayrinti)
@@ -1238,12 +1350,34 @@ class _KameraEkraniState extends State<KameraEkrani> {
               ),
             ),
             Positioned(
+              right: 20,
+              bottom: 264,
+              child: _yuvarlakDugme(
+                renk: _guler ? Colors.green : Colors.black54,
+                onTap: () => setState(() {
+                  _guler = !_guler;
+                  _tampon.clear();
+                  _zirveBaslangic = null;
+                  _zirvePuan = 0;
+                }),
+                icerik: const Text(
+                  'ARA\nGÜLER',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
+            Positioned(
               bottom: 110,
               left: 90,
               right: 90,
               child: Column(
                 children: [
-                  if (_yuzSayisi > 0 && _degerlendirme.ipucu != null)
+                  if ((_yuzSayisi > 0 || _guler) &&
+                      _degerlendirme.ipucu != null)
                     Container(
                       margin: const EdgeInsets.only(bottom: 6),
                       padding: const EdgeInsets.symmetric(
@@ -1386,6 +1520,8 @@ class _Degerlendirme {
   int yuzNetligi = 0;
   int ayrisma = 0;
   int an = 0;
+  int kendiligindenlik = 0; // Ara Güler modu
+  int baglam = 0; // Ara Güler modu
   int puan = 0;
   String? ipucu;
   String ham = '';
@@ -1658,6 +1794,19 @@ const Map<String, _Gorunum> gorunumler = {
     soluk: 6,
     vBaslangic: 0.65,
     vMiktar: 0.3,
+  ),
+  // Ara Güler: belgesel siyah-beyaz. Tri-X filme benzer güçlü kontrast, derin
+  // siyahlar, belirgin gren, baskı kâğıdı gibi çok hafif sıcak ton. Süsleme yok:
+  // cilt yumuşatma ve ışıma kullanılmaz; fotoğraf gerçeği göstermeli.
+  'Ara Güler': _Gorunum(
+    gri: true,
+    egri: 0.7,
+    isik: [4, 2, 0],
+    netlik: 0.3,
+    tepe: 248,
+    vBaslangic: 0.5,
+    vMiktar: 0.4,
+    gren: 14,
   ),
   // Eski sürümlerden kalan kategori: soluk, serin, hafif vinyet
   'Düşünceli': _Gorunum(
