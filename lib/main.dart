@@ -14,6 +14,9 @@ import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
 late List<CameraDescription> kameralar;
 
+// Kapalı/kırpılmış gözün kusur sayılmadığı ruh halleri
+const Set<String> gozKapaliOlabilir = {'Gizemli', 'Komik', 'Muzip'};
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   kameralar = await availableCameras();
@@ -253,6 +256,18 @@ class _KameraEkraniState extends State<KameraEkrani> {
           agiz = kirp(((l.y - u.y).abs() / a.boundingBox.height) / 0.12);
         }
 
+        // Çarpık gülüş: ağız köşelerinden biri diğerinden belirgin yukarıda
+        double carpik = 0;
+        final dudak = a.contours[FaceContourType.upperLipTop];
+        if (dudak != null && dudak.points.length >= 2) {
+          final k1 = dudak.points.first;
+          final k2 = dudak.points.last;
+          carpik = kirp(((k1.y - k2.y).abs() / a.boundingBox.height) / 0.05);
+        }
+        // Göz kırpma: bir göz açık, diğeri kapalı
+        final kirpma = kirp(((gl - gr).abs() - 0.3) / 0.4);
+        final abartiliEgim = kirp((yatik - 12) / 18);
+
         // NEŞELİ: içten gülümseme, gözlerde mutluluk
         double nese = s * 0.7 + g * 0.15 + agiz * s * 0.15;
         if (g < 0.3) nese *= 0.7;
@@ -311,6 +326,31 @@ class _KameraEkraniState extends State<KameraEkrani> {
         final saskin = agiz * kirp(1 - s * 2) * (g > 0.8 ? 1.0 : 0.6);
         kat['Şaşkın'] = (kirp(saskin) * 100).round();
 
+        // KOMİK: abartılı ifade — kahkaha, göz kırpma, uçuk baş açısı, şaşkın surat
+        // En güçlü tek abartı işareti yeterli; kahkaha ve kollar üstüne eklenir.
+        final abarti = enBuyuk(kirpma, enBuyuk(abartiliEgim, saskin));
+        final komik = abarti * 0.55 + agiz * s * 0.3 + kollar * 0.15;
+        kat['Komik'] = (kirp(komik) * 100).round();
+
+        // COOL: zahmetsiz rahatlık — gevşek göz, gülüşsüz/hafif ifade, hafif baş
+        // yatıklığı, sakin. Karizmatik'ten farkı: dik ve doğrudan değil, rahat.
+        final rahatGoz = kirp(1 - (g - 0.7).abs() * 4);
+        final hafifYatik = kirp(1 - (yatik - 10).abs() / 10);
+        final yanBakis = kirp(1 - (yaw - 20).abs() / 15);
+        final cool = rahatGoz * 0.25 +
+            kirp(1 - s * 2.5) * 0.25 +
+            hafifYatik * 0.2 +
+            sabit * 0.15 +
+            yanBakis * 0.15;
+        kat['Cool'] = (kirp(cool) * 100).round();
+
+        // MUZİP: şakacı bakış — yarım/çarpık gülüş veya göz kırpma
+        final yarimGulus = kirp(1 - (s - 0.55).abs() * 3);
+        final muzip = enBuyuk(carpik * yarimGulus, kirpma) * 0.7 +
+            yarimGulus * 0.2 +
+            hafifYatik * 0.1;
+        kat['Muzip'] = (kirp(muzip) * 100).round();
+
         // Teknik etiketler
         if (kameralar[_kameraIndex].lensDirection == CameraLensDirection.front) {
           teknik.add('Selfie');
@@ -321,7 +361,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
         if (a.boundingBox.width / kareGenislik > 0.3) teknik.add('Yakın çekim');
         if (_tamBoy) teknik.add('Tam boy');
 
-        ham = 'dönüş ${yaw.toStringAsFixed(0)}° · eğim ${egim.toStringAsFixed(0)}° · gülüş ${(s * 100).round()} · göz ${(g * 100).round()} · ağız ${(agiz * 100).round()}';
+        ham = 'dönüş ${yaw.toStringAsFixed(0)}° · eğim ${egim.toStringAsFixed(0)}° · yatık ${yatik.toStringAsFixed(0)}° · gülüş ${(s * 100).round()} · göz ${(g * 100).round()} · ağız ${(agiz * 100).round()} · çarpık ${(carpik * 100).round()}';
       }
 
       String? baskin;
@@ -527,7 +567,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
       // Kadrajda insan varsa anın gücü (en baskın ruh hali) hesaba katılır
       if (_yuzSayisi > 0 && _baskin != null) {
         t = t * 0.5 + _baskinPuan * 0.5;
-        if (_gozKapali && _baskin != 'Gizemli' && t > 50) t = 50.0;
+        if (_gozKapali && !gozKapaliOlabilir.contains(_baskin) && t > 50) {
+          t = 50.0;
+        }
       }
 
       if (mounted) {
@@ -787,7 +829,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       yuzRozeti = _griRozet('Yüz analizi yok');
     } else if (_yuzSayisi == 0) {
       yuzRozeti = _griRozet('Yüz yok');
-    } else if (_gozKapali && _baskin != 'Gizemli') {
+    } else if (_gozKapali && !gozKapaliOlabilir.contains(_baskin)) {
       yuzRozeti = _rozet('Göz kapalı', 0);
     } else {
       yuzRozeti = _rozet(_baskin ?? 'Yüz $_yuzSayisi', _baskinPuan);
@@ -800,6 +842,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
       'Gizemli': 'Gi',
       'Samimi': 'Sa',
       'Şaşkın': 'Şa',
+      'Komik': 'Ko',
+      'Cool': 'Co',
+      'Muzip': 'Mu',
     };
     final katSatiri = _kategoriler.entries
         .map((e) => '${kisaltma[e.key] ?? e.key} ${e.value}')
@@ -1145,6 +1190,7 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
   double dr = 0, dg = 0, db = 0;
   double vBaslangic = 1.0; // kenar karartmanın başladığı mesafe (0-1)
   double vMiktar = 0.0; // kenarda ne kadar kararacağı (0-1)
+  double soluk = 0.0; // siyahları kaldırma (mat görünüm), 0-255
 
   switch (kategori) {
     case 'Karizmatik': // siyah-beyaz, güçlü ama yumuşak kontrast, vinyet
@@ -1172,6 +1218,31 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
       db = 8;
       vBaslangic = 0.45;
       vMiktar = 0.5;
+      break;
+    case 'Komik': // pop: çok canlı renkler, belirgin kontrast, hafif sıcak
+      doygunluk = 1.45;
+      kontrast = 1.15;
+      parlaklik = 1.05;
+      dr = 6;
+      dg = 4;
+      db = -6;
+      break;
+    case 'Cool': // mat ve serin: kaldırılmış siyahlar, hafif soluk, mavi gölge
+      doygunluk = 0.85;
+      kontrast = 1.08;
+      dr = -6;
+      db = 10;
+      soluk = 22;
+      break;
+    case 'Muzip': // sıcak, hafif canlı, yumuşak vinyet
+      doygunluk = 1.15;
+      kontrast = 1.05;
+      parlaklik = 1.03;
+      dr = 10;
+      dg = 2;
+      db = -6;
+      vBaslangic = 0.65;
+      vMiktar = 0.25;
       break;
     case 'Şaşkın': // hafif canlandırma
       doygunluk = 1.15;
@@ -1228,6 +1299,13 @@ imglib.Image efektUygula(imglib.Image im, String kategori) {
     r = (r - 128) * kontrast + 128 + dr;
     g = (g - 128) * kontrast + 128 + dg;
     b = (b - 128) * kontrast + 128 + db;
+
+    if (soluk > 0) {
+      final f = 1 - soluk / 255;
+      r = soluk + r * f;
+      g = soluk + g * f;
+      b = soluk + b * f;
+    }
 
     if (vMiktar > 0) {
       final dx = p.x - cx;
