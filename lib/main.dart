@@ -115,6 +115,11 @@ class _KameraEkraniState extends State<KameraEkrani> {
   int _grupUyumu = 100; // gözü açık ve kameraya dönük kişilerin oranı
   double _egimSapma = 0; // telefonun yataydan sapması (derece)
   StreamSubscription<AccelerometerEvent>? _ivmeAbone;
+  // Telefonun dönme hızı (rad/sn, yumuşatılmış). Bulanıklığı yapan şey kameranın
+  // dönmesidir; karedeki değişim ise elin yavaş kaymasını da titreme sanır.
+  double _titreme = 0;
+  DateTime _sonJiro = DateTime(2000);
+  StreamSubscription<GyroscopeEvent>? _jiroAbone;
   _Degerlendirme _degerlendirme = _Degerlendirme();
 
   @override
@@ -130,6 +135,13 @@ class _KameraEkraniState extends State<KameraEkrani> {
       var aci = (math.atan2(e.x, e.y) * 180 / math.pi).abs() % 90;
       if (aci > 45) aci = 90 - aci;
       _egimSapma = _egimSapma * 0.7 + aci * 0.3;
+    }, onError: (_) {});
+    _jiroAbone = gyroscopeEventStream(
+            samplingPeriod: SensorInterval.gameInterval)
+        .listen((e) {
+      final hiz = math.sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
+      _titreme = _titreme * 0.8 + hiz * 0.2;
+      _sonJiro = DateTime.now();
     }, onError: (_) {});
   }
 
@@ -176,6 +188,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     _pozDedektoru.close();
     _geriSayimZamanlayici?.cancel();
     _ivmeAbone?.cancel();
+    _jiroAbone?.cancel();
     super.dispose();
   }
 
@@ -603,7 +616,12 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final isik =
           (100 - ((parlaklik - 130).abs() / 130 * 100)).clamp(0, 100).round();
       final net = (netlik / 8 * 100).clamp(0, 100).round();
-      final sabit = (100 - (hareket - 2) * 8).clamp(0, 100).round();
+      // Jiroskop varsa sabitliği telefonun dönme hızı belirler (0.08 rad/sn
+      // altı tam sabit, 0.6 üstü sarsıntı); yoksa eski kare farkı yöntemi.
+      final jiroVar = DateTime.now().difference(_sonJiro).inMilliseconds < 1000;
+      final sabit = jiroVar
+          ? (100 - (_titreme - 0.08) / 0.52 * 100).clamp(0, 100).round()
+          : (100 - (hareket - 2) * 8).clamp(0, 100).round();
       double t = isik * 0.3 + net * 0.3 + sabit * 0.4;
       if (sabit < 50 && _baskin != 'Enerjik') t = t * 0.5;
 
@@ -741,12 +759,14 @@ class _KameraEkraniState extends State<KameraEkrani> {
     if (oran > 3.0) isik -= 15;
 
     // 2) Yüz netliği: fotoğrafçı kadrajın ortasına değil gözlere odaklanır
-    final yuzNet = yk / 5 * 100;
+    // (ölçek: telefonda net yüzde ~8, hafif yumuşamış yüzde ~5 ölçüldü)
+    final yuzNet = (yk - 2) / 6 * 100;
 
     // 3) Ayrışma: yüz arka plandan daha net mi (bokeh), arka plan kalabalık mı
     final ayrisma = 50 +
         (yk / math.max(0.5, netlik) - 1) * 50 -
-        math.max(0.0, netlik - 12) * 3;
+        math.max(0.0, netlik - 12) * 3 +
+        math.max(0.0, 8 - netlik) * 3; // sade, düz arka plan konuyu öne çıkarır
 
     // 4) Kompozisyon: üçler kuralı, baş boşluğu, kesik yüz, konu büyüklüğü,
     //    telefonun düz tutulması
@@ -791,7 +811,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
     d.ham =
         'yüz ışığı ${yl.toStringAsFixed(0)} · ışık oranı ${oran.toStringAsFixed(2)} · yüz kenar ${yk.toStringAsFixed(1)} · telefon eğimi ${_egimSapma.toStringAsFixed(1)}°';
 
-    // En önemli sorundan başlayarak tek bir ipucu
+    // En önemli sorundan başlayarak tek bir ipucu. Kesik yüz, kapalı göz ve
+    // sarsıntı fotoğrafı bozar; geri kalanlar puan eşiği aşıldıysa ince ayardır
+    // ve "işte bu an" demeye engel olmaz (puan ile ipucu çelişmesin).
     if (kenardaKesik) {
       d.ipucu = 'Yüz kadrajdan taşıyor — biraz geri çekil';
     } else if (basKesik) {
@@ -802,6 +824,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
       d.ipucu = 'Herkes kameraya baksın';
     } else if (sabit < 50 && _baskin != 'Enerjik') {
       d.ipucu = 'Telefonu sabit tut';
+    } else if (d.puan >= esik) {
+      d.ipucu = '✓ İşte bu an';
     } else if (yamuk) {
       d.ipucu = 'Telefonu düzelt (${_egimSapma.toStringAsFixed(0)}° yamuk)';
     } else if (karsiIsik || yl < 70) {
@@ -813,13 +837,11 @@ class _KameraEkraniState extends State<KameraEkrani> {
     } else if (konuKucuk) {
       d.ipucu = 'Yaklaş — konu çok küçük';
     } else if (gozHatti > hedefY + 0.12) {
-      d.ipucu = 'Telefonu biraz aşağı eğ — gözler üst üçte birde olsun';
+      d.ipucu = 'Telefonu biraz aşağı indir — gözler üst üçte bire gelsin';
     } else if (gozHatti < hedefY - 0.15 && yuzGen < 0.5) {
       d.ipucu = 'Telefonu biraz yukarı kaldır';
     } else if (yatayP < 0.4) {
       d.ipucu = 'Konuyu üçte bir çizgisine ya da ortaya al';
-    } else if (d.puan >= esik) {
-      d.ipucu = '✓ İşte bu an';
     } else if (an < 50) {
       d.ipucu = 'Kadraj hazır — anı bekle';
     }
@@ -1113,7 +1135,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
                   if (_ayrinti) const SizedBox(height: 6),
                   if (_ayrinti)
                     Text(
-                      'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
+                      'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)} · titreme ${_titreme.toStringAsFixed(2)}',
                       style: const TextStyle(color: Colors.white70, fontSize: 12),
                     ),
                   if (_ayrinti && _yuzSayisi > 0)
