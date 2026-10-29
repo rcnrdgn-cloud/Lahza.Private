@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:image/image.dart' as imglib;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
 late List<CameraDescription> kameralar;
 
@@ -89,7 +90,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
   Timer? _geriSayimZamanlayici;
 
   // Otomatik çekim
-  static const int esik = 80;
+  static const int esik = 75;
   static const int gerekenArdisik = 3;
   bool _otomatik = false;
   int _iyiSayac = 0;
@@ -107,10 +108,29 @@ class _KameraEkraniState extends State<KameraEkrani> {
   // Kalibrasyon ayrıntıları (puanlar, ham değerler, etiketler) varsayılan olarak gizli
   bool _ayrinti = false;
 
+  // Fotoğrafçı gözü: kompozisyon, yüzdeki ışık, yüzün netliği, arka plandan
+  // ayrışma ve an. Hepsi iyi olduğunda "işte bu" denir.
+  Rect? _anaYuz; // en büyük yüz, dik (ekranda görünen) görüntü koordinatlarında
+  Size _dikBoyut = Size.zero;
+  int _grupUyumu = 100; // gözü açık ve kameraya dönük kişilerin oranı
+  double _egimSapma = 0; // telefonun yataydan sapması (derece)
+  StreamSubscription<AccelerometerEvent>? _ivmeAbone;
+  _Degerlendirme _degerlendirme = _Degerlendirme();
+
   @override
   void initState() {
     super.initState();
     _kameraBaslat(0);
+    _ivmeAbone = accelerometerEventStream(
+            samplingPeriod: SensorInterval.uiInterval)
+        .listen((e) {
+      final yatay = math.sqrt(e.x * e.x + e.y * e.y);
+      if (yatay < 4) return; // telefon yere paralel: eğim anlamsız
+      // Dikey ya da yatay tutuşa göre en yakın düz konumdan sapma
+      var aci = (math.atan2(e.x, e.y) * 180 / math.pi).abs() % 90;
+      if (aci > 45) aci = 90 - aci;
+      _egimSapma = _egimSapma * 0.7 + aci * 0.3;
+    }, onError: (_) {});
   }
 
   Future<void> _kameraBaslat(int index) async {
@@ -155,6 +175,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     _yuzDedektoru.close();
     _pozDedektoru.close();
     _geriSayimZamanlayici?.cancel();
+    _ivmeAbone?.cancel();
     super.dispose();
   }
 
@@ -232,6 +253,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final kat = <String, int>{};
       final teknik = <String>[];
       String ham = '';
+      Rect? anaYuz;
+      Size dikBoyut = Size.zero;
+      int grupUyumu = 100;
       if (yuzler.isNotEmpty) {
         final a = yuzler.first;
         final n = yuzler.length;
@@ -364,6 +388,20 @@ class _KameraEkraniState extends State<KameraEkrani> {
         if (a.boundingBox.width / kareGenislik > 0.3) teknik.add('Yakın çekim');
         if (_tamBoy) teknik.add('Tam boy');
 
+        anaYuz = a.boundingBox;
+        dikBoyut = dikey
+            ? Size(img.height.toDouble(), img.width.toDouble())
+            : Size(img.width.toDouble(), img.height.toDouble());
+        int uyumlu = 0;
+        for (final y in yuzler) {
+          final sol = y.leftEyeOpenProbability ?? 0.5;
+          final sag = y.rightEyeOpenProbability ?? 0.5;
+          if (math.min(sol, sag) > 0.5 && (y.headEulerAngleY ?? 0).abs() < 30) {
+            uyumlu++;
+          }
+        }
+        grupUyumu = (uyumlu * 100 / n).round();
+
         ham = 'dönüş ${yaw.toStringAsFixed(0)}° · eğim ${egim.toStringAsFixed(0)}° · yatık ${yatik.toStringAsFixed(0)}° · gülüş ${(s * 100).round()} · göz ${(g * 100).round()} · ağız ${(agiz * 100).round()} · çarpık ${(carpik * 100).round()}';
       }
 
@@ -386,6 +424,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
           _baskinPuan = baskinPuan;
           _hamYuz = ham;
           _teknik = teknik;
+          _anaYuz = anaYuz;
+          _dikBoyut = dikBoyut;
+          _grupUyumu = grupUyumu;
           if (_yuzHata.startsWith('PlatformException')) _yuzHata = '';
         });
       }
@@ -566,17 +607,18 @@ class _KameraEkraniState extends State<KameraEkrani> {
       double t = isik * 0.3 + net * 0.3 + sabit * 0.4;
       if (sabit < 50 && _baskin != 'Enerjik') t = t * 0.5;
 
-      // Kadrajda insan varsa yüz puanı da hesaba katılır
-      // Kadrajda insan varsa anın gücü (en baskın ruh hali) hesaba katılır
+      // Kadrajda insan varsa puanı fotoğrafçı gözü verir: kompozisyon, yüzdeki
+      // ışık, yüzün netliği, ayrışma ve anın gücü birlikte
+      var degerlendirme = _Degerlendirme();
       if (_yuzSayisi > 0 && _baskin != null) {
-        t = t * 0.5 + _baskinPuan * 0.5;
-        if (_gozKapali && !gozKapaliOlabilir.contains(_baskin) && t > 50) {
-          t = 50.0;
-        }
+        degerlendirme =
+            _fotografciGozu(b, satir, w, h, parlaklik, netlik, sabit);
+        t = degerlendirme.puan.toDouble();
       }
 
       if (mounted) {
         setState(() {
+          _degerlendirme = degerlendirme;
           _isikPuani = isik;
           _netlikPuani = net;
           _sabitlikPuani = sabit;
@@ -627,6 +669,161 @@ class _KameraEkraniState extends State<KameraEkrani> {
     } finally {
       _isleniyor = false;
     }
+  }
+
+  // Dik (ekranda görünen) görüntüdeki bir noktayı ham sensör karesine çevirir.
+  Offset _hamNokta(double u, double v, int w, int h) {
+    switch (kameralar[_kameraIndex].sensorOrientation) {
+      case 90:
+        return Offset(v, h - 1 - u);
+      case 180:
+        return Offset(w - 1 - u, h - 1 - v);
+      case 270:
+        return Offset(w - 1 - v, u);
+      default:
+        return Offset(u, v);
+    }
+  }
+
+  // Bir fotoğrafçının deklanşöre basmadan önce baktığı şeyleri puanlar ve
+  // puanı en çok düşüren sorun için tek bir ipucu üretir.
+  _Degerlendirme _fotografciGozu(Uint8List b, int satir, int w, int h,
+      double parlaklik, double netlik, int sabit) {
+    final d = _Degerlendirme();
+    final kutu = _anaYuz;
+    final gw = _dikBoyut.width;
+    final gh = _dikBoyut.height;
+    if (kutu == null || gw == 0 || gh == 0) return d;
+
+    // Yüz bölgesini ham karede bul; ışığını, iki yarısını ve netliğini ölç
+    final p1 = _hamNokta(kutu.left, kutu.top, w, h);
+    final p2 = _hamNokta(kutu.right, kutu.bottom, w, h);
+    final hx0 = math.max(0, math.min(p1.dx, p2.dx).floor());
+    final hx1 = math.min(w - 2, math.max(p1.dx, p2.dx).ceil());
+    final hy0 = math.max(0, math.min(p1.dy, p2.dy).floor());
+    final hy1 = math.min(h - 2, math.max(p1.dy, p2.dy).ceil());
+    // Ekrandaki sol-sağ ayrımı, sensör 90/270° döndüyse ham karede dikey eksendir
+    final dikey = kameralar[_kameraIndex].sensorOrientation % 180 != 0;
+    final orta = dikey ? (hy0 + hy1) ~/ 2 : (hx0 + hx1) ~/ 2;
+    final adim = math.max(2, (hx1 - hx0) ~/ 40);
+    int toplam = 0, adet = 0, kenar = 0;
+    int ya = 0, yaAdet = 0, yb = 0, ybAdet = 0;
+    for (int y = hy0; y < hy1; y += adim) {
+      final o = y * satir;
+      for (int x = hx0; x < hx1; x += adim) {
+        final v = b[o + x];
+        toplam += v;
+        adet++;
+        kenar += (v - b[o + x + 1]).abs() + (v - b[o + satir + x]).abs();
+        if ((dikey ? y : x) < orta) {
+          ya += v;
+          yaAdet++;
+        } else {
+          yb += v;
+          ybAdet++;
+        }
+      }
+    }
+    if (adet == 0) return d;
+    final yl = toplam / adet;
+    final yk = kenar / adet;
+    final la = yaAdet == 0 ? yl : ya / yaAdet;
+    final lb = ybAdet == 0 ? yl : yb / ybAdet;
+    final oran = math.max(la, lb) / math.max(1.0, math.min(la, lb));
+
+    // 1) Yüzdeki ışık: yüz iyi pozlanmış mı, karşı ışık var mı, ışık yüze
+    //    derinlik veriyor mu (bir yan hafif daha aydınlık) yoksa sert mi
+    double isik =
+        100 - math.max(0.0, 95 - yl) * 1.5 - math.max(0.0, yl - 190) * 2.5;
+    final karsiIsik = parlaklik - yl > 45;
+    if (karsiIsik) isik -= (parlaklik - yl - 45) * 1.2;
+    if (oran > 1.15 && oran < 2.2) isik += 8;
+    if (oran > 3.0) isik -= 15;
+
+    // 2) Yüz netliği: fotoğrafçı kadrajın ortasına değil gözlere odaklanır
+    final yuzNet = yk / 5 * 100;
+
+    // 3) Ayrışma: yüz arka plandan daha net mi (bokeh), arka plan kalabalık mı
+    final ayrisma = 50 +
+        (yk / math.max(0.5, netlik) - 1) * 50 -
+        math.max(0.0, netlik - 12) * 3;
+
+    // 4) Kompozisyon: üçler kuralı, baş boşluğu, kesik yüz, konu büyüklüğü,
+    //    telefonun düz tutulması
+    final cx = kutu.center.dx / gw;
+    final gozHatti = (kutu.top + kutu.height * 0.4) / gh;
+    final yatayUzak = math.min(
+        math.min((cx - 1 / 3).abs(), (cx - 2 / 3).abs()), (cx - 0.5).abs() + 0.04);
+    final yatayP = _aralikta(1 - yatayUzak / 0.17, 0, 1);
+    final hedefY = _tamBoy ? 0.18 : 0.33;
+    final dikeyP = _aralikta(1 - (gozHatti - hedefY).abs() / 0.2, 0, 1);
+    double komp = 30 + yatayP * 35 + dikeyP * 35;
+    final yuzGen = kutu.width / gw;
+    final kenardaKesik = kutu.left < gw * 0.01 ||
+        kutu.right > gw * 0.99 ||
+        kutu.bottom > gh * 0.99;
+    final basKesik = kutu.top < gh * 0.015 && yuzGen < 0.5;
+    final konuKucuk = !_tamBoy && yuzGen < 0.08;
+    final yamuk = _egimSapma > 2 && _egimSapma < 15;
+    if (kenardaKesik) komp -= 45;
+    if (basKesik) komp -= 30;
+    if (konuKucuk) komp -= 20;
+    if (yamuk) komp -= (_egimSapma - 2) * 2.5;
+
+    // 5) An: ifadenin gücü; grupta herkesin gözü açık ve kameraya dönük olmalı
+    final gozSorun = _gozKapali && !gozKapaliOlabilir.contains(_baskin);
+    double an = _baskinPuan * (_yuzSayisi >= 2 ? _grupUyumu / 100 : 1.0);
+    if (gozSorun) an *= 0.3;
+
+    double puan = _aralikta(komp, 0, 100) * 0.25 +
+        _aralikta(isik, 0, 100) * 0.2 +
+        _aralikta(yuzNet, 0, 100) * 0.2 +
+        _aralikta(an, 0, 100) * 0.25 +
+        _aralikta(ayrisma, 0, 100) * 0.1;
+    if (sabit < 50 && _baskin != 'Enerjik') puan *= 0.6;
+
+    d.kompozisyon = _aralikta(komp, 0, 100).round();
+    d.yuzIsigi = _aralikta(isik, 0, 100).round();
+    d.yuzNetligi = _aralikta(yuzNet, 0, 100).round();
+    d.ayrisma = _aralikta(ayrisma, 0, 100).round();
+    d.an = _aralikta(an, 0, 100).round();
+    d.puan = puan.round();
+    d.ham =
+        'yüz ışığı ${yl.toStringAsFixed(0)} · ışık oranı ${oran.toStringAsFixed(2)} · yüz kenar ${yk.toStringAsFixed(1)} · telefon eğimi ${_egimSapma.toStringAsFixed(1)}°';
+
+    // En önemli sorundan başlayarak tek bir ipucu
+    if (kenardaKesik) {
+      d.ipucu = 'Yüz kadrajdan taşıyor — biraz geri çekil';
+    } else if (basKesik) {
+      d.ipucu = 'Başın üstü kesiliyor — telefonu biraz yukarı kaldır';
+    } else if (gozSorun) {
+      d.ipucu = 'Gözler kapalı';
+    } else if (_yuzSayisi >= 2 && _grupUyumu < 70) {
+      d.ipucu = 'Herkes kameraya baksın';
+    } else if (sabit < 50 && _baskin != 'Enerjik') {
+      d.ipucu = 'Telefonu sabit tut';
+    } else if (yamuk) {
+      d.ipucu = 'Telefonu düzelt (${_egimSapma.toStringAsFixed(0)}° yamuk)';
+    } else if (karsiIsik || yl < 70) {
+      d.ipucu = 'Yüz karanlık — ışığa doğru dön';
+    } else if (yl > 205) {
+      d.ipucu = 'Yüzde ışık patlıyor — gölgeye geç';
+    } else if (yuzNet < 40) {
+      d.ipucu = 'Yüz net değil';
+    } else if (konuKucuk) {
+      d.ipucu = 'Yaklaş — konu çok küçük';
+    } else if (gozHatti > hedefY + 0.12) {
+      d.ipucu = 'Telefonu biraz aşağı eğ — gözler üst üçte birde olsun';
+    } else if (gozHatti < hedefY - 0.15 && yuzGen < 0.5) {
+      d.ipucu = 'Telefonu biraz yukarı kaldır';
+    } else if (yatayP < 0.4) {
+      d.ipucu = 'Konuyu üçte bir çizgisine ya da ortaya al';
+    } else if (d.puan >= esik) {
+      d.ipucu = '✓ İşte bu an';
+    } else if (an < 50) {
+      d.ipucu = 'Kadraj hazır — anı bekle';
+    }
+    return d;
   }
 
   // Fotoğrafın bir kopyasını ve etiketlerini uygulamanın kendi arşivine yazar
@@ -864,16 +1061,21 @@ class _KameraEkraniState extends State<KameraEkrani> {
             Center(
               child: CameraPreview(
                 kontrol,
-                child: (_iskeletGoster && _poz != null)
-                    ? CustomPaint(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    CustomPaint(painter: UcteBirCizer()),
+                    if (_iskeletGoster && _poz != null)
+                      CustomPaint(
                         painter: IskeletCizer(
                           _poz!,
                           _resimBoyutu,
                           kameralar[_kameraIndex].lensDirection ==
                               CameraLensDirection.front,
                         ),
-                      )
-                    : null,
+                      ),
+                  ],
+                ),
               ),
             ),
             Positioned(
@@ -894,6 +1096,20 @@ class _KameraEkraniState extends State<KameraEkrani> {
                       if (_ayrinti) _rozet('Toplam', _toplamPuan),
                     ],
                   ),
+                  if (_ayrinti && _yuzSayisi > 0) const SizedBox(height: 6),
+                  if (_ayrinti && _yuzSayisi > 0)
+                    Wrap(
+                      alignment: WrapAlignment.center,
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        _rozet('Kompozisyon', _degerlendirme.kompozisyon),
+                        _rozet('Yüz ışığı', _degerlendirme.yuzIsigi),
+                        _rozet('Yüz netliği', _degerlendirme.yuzNetligi),
+                        _rozet('Ayrışma', _degerlendirme.ayrisma),
+                        _rozet('An', _degerlendirme.an),
+                      ],
+                    ),
                   if (_ayrinti) const SizedBox(height: 6),
                   if (_ayrinti)
                     Text(
@@ -916,7 +1132,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
                     ),
                   if (_ayrinti && _yuzSayisi > 0)
                     Text(
-                      '$_hamYuz\n$katSatiri',
+                      '$_hamYuz\n${_degerlendirme.ham}\n$katSatiri',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.white70, fontSize: 12),
                     ),
@@ -1001,10 +1217,31 @@ class _KameraEkraniState extends State<KameraEkrani> {
             ),
             Positioned(
               bottom: 110,
-              left: 0,
-              right: 0,
+              left: 90,
+              right: 90,
               child: Column(
                 children: [
+                  if (_yuzSayisi > 0 && _degerlendirme.ipucu != null)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 6),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Text(
+                        _degerlendirme.ipucu!,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: _degerlendirme.ipucu!.startsWith('✓')
+                              ? const Color(0xFFF2A33A)
+                              : Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                   Text(
                     'Çekilen: $_cekimSayisi',
                     style: const TextStyle(color: Colors.white, fontSize: 13),
@@ -1118,6 +1355,37 @@ class IskeletCizer extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant IskeletCizer eski) => true;
+}
+
+// Fotoğrafçı gözünün bir kare için verdiği puanlar ve ipucu
+class _Degerlendirme {
+  int kompozisyon = 0;
+  int yuzIsigi = 0;
+  int yuzNetligi = 0;
+  int ayrisma = 0;
+  int an = 0;
+  int puan = 0;
+  String? ipucu;
+  String ham = '';
+}
+
+// Kadraja üçler kuralı çizgilerini çok silik olarak çizer.
+class UcteBirCizer extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final kalem = Paint()
+      ..color = Colors.white.withAlpha(60)
+      ..strokeWidth = 0.8;
+    for (final k in [1 / 3, 2 / 3]) {
+      canvas.drawLine(
+          Offset(size.width * k, 0), Offset(size.width * k, size.height), kalem);
+      canvas.drawLine(
+          Offset(0, size.height * k), Offset(size.width, size.height * k), kalem);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant UcteBirCizer eski) => false;
 }
 
 // Hafızada tutulan tek bir kamera karesi ve puanı
