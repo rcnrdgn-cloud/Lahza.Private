@@ -1202,145 +1202,344 @@ Uint8List? dosyayaEfektUygula(Map<String, dynamic> v) {
 // Değeri 0-255 aralığına sıkıştırır (taşmayı önler).
 int _sinirla(num v) => v < 0 ? 0 : (v > 255 ? 255 : v.round());
 
+// Değeri [alt, ust] aralığına sıkıştırır (double olarak).
+double _aralikta(double v, double alt, double ust) =>
+    v < alt ? alt : (v > ust ? ust : v);
+
+// Bir ruh halinin görünüm reçetesi. Tüm renk kaymaları 0-255 ölçeğinde.
+class _Gorunum {
+  final bool gri; // siyah-beyaz
+  final double pozlama; // genel parlaklık çarpanı
+  final double egri; // S-eğrisi gücü: + kontrast artar, - yumuşar
+  final double doygunluk; // tüm renklere eşit doygunluk
+  final double canlilik; // soluk renkleri daha çok canlandırır (cildi yakmaz)
+  final List<double> golge; // gölgelere eklenen renk (r, g, b)
+  final List<double> isik; // parlak bölgelere eklenen renk (r, g, b)
+  final double netlik; // yerel kontrast: + detay/doku, - yumuşak cilt
+  final double parlama; // parlak bölgelerden yayılan hafif ışıma
+  final double soluk; // siyahları kaldırma (mat görünüm)
+  final double tepe; // en parlak beyaz (255 = sınırsız)
+  final double vBaslangic; // kenar karartmanın başladığı mesafe (0-1)
+  final double vMiktar; // kenarda ne kadar kararacağı (0-1)
+  final double gren; // film greni miktarı
+  const _Gorunum({
+    this.gri = false,
+    this.pozlama = 1.0,
+    this.egri = 0,
+    this.doygunluk = 1.0,
+    this.canlilik = 0,
+    this.golge = const [0, 0, 0],
+    this.isik = const [0, 0, 0],
+    this.netlik = 0,
+    this.parlama = 0,
+    this.soluk = 0,
+    this.tepe = 255,
+    this.vBaslangic = 1.0,
+    this.vMiktar = 0,
+    this.gren = 0,
+  });
+}
+
+const Map<String, _Gorunum> gorunumler = {
+  // Klasik portre: dramatik siyah-beyaz, belirgin doku, hafif selenyum tonu
+  'Karizmatik': _Gorunum(
+    gri: true,
+    egri: 0.55,
+    golge: [-2, 0, 5],
+    isik: [6, 3, 0],
+    netlik: 0.45,
+    soluk: 6,
+    tepe: 250,
+    vBaslangic: 0.5,
+    vMiktar: 0.5,
+    gren: 9,
+  ),
+  // Altın saat: aydınlık, sıcak ışık, hafif ışıma
+  'Neşeli': _Gorunum(
+    pozlama: 1.06,
+    egri: 0.2,
+    doygunluk: 1.05,
+    canlilik: 0.35,
+    golge: [2, 0, -2],
+    isik: [14, 7, -6],
+    netlik: -0.1,
+    parlama: 0.22,
+    soluk: 6,
+    vBaslangic: 0.75,
+    vMiktar: 0.15,
+  ),
+  // Canlı ve sıcak, gölgelerde hafif turkuaz
+  'Eğlenceli': _Gorunum(
+    pozlama: 1.03,
+    egri: 0.4,
+    doygunluk: 1.15,
+    canlilik: 0.35,
+    golge: [-3, 1, 8],
+    isik: [10, 4, -6],
+    netlik: 0.1,
+    parlama: 0.1,
+    vBaslangic: 0.7,
+    vMiktar: 0.2,
+  ),
+  // Sinematik turkuaz-turuncu, sert kontrast, keskin
+  'Enerjik': _Gorunum(
+    egri: 0.6,
+    doygunluk: 1.2,
+    canlilik: 0.2,
+    golge: [-8, 3, 14],
+    isik: [14, 5, -8],
+    netlik: 0.35,
+    vBaslangic: 0.55,
+    vMiktar: 0.35,
+    gren: 4,
+  ),
+  // Film noir'a yakın: koyu, soğuk gölgeler, mat siyahlar, güçlü vinyet
+  'Gizemli': _Gorunum(
+    pozlama: 0.9,
+    egri: 0.5,
+    doygunluk: 0.55,
+    golge: [-6, 1, 12],
+    isik: [5, 3, -2],
+    netlik: 0.2,
+    soluk: 14,
+    tepe: 235,
+    vBaslangic: 0.4,
+    vMiktar: 0.6,
+    gren: 12,
+  ),
+  // Sıcak, yumuşak ve pastel: pürüzsüz cilt, hafif ışıma
+  'Samimi': _Gorunum(
+    pozlama: 1.04,
+    egri: 0.12,
+    doygunluk: 1.0,
+    canlilik: 0.2,
+    golge: [6, 2, -1],
+    isik: [12, 6, -6],
+    netlik: -0.2,
+    parlama: 0.3,
+    soluk: 10,
+    vBaslangic: 0.7,
+    vMiktar: 0.2,
+  ),
+  // Parlak ve net, hafif serin vurgular
+  'Şaşkın': _Gorunum(
+    pozlama: 1.04,
+    egri: 0.35,
+    doygunluk: 1.1,
+    canlilik: 0.3,
+    golge: [0, 0, 4],
+    isik: [4, 5, 8],
+    netlik: 0.15,
+    vBaslangic: 0.7,
+    vMiktar: 0.15,
+  ),
+  // Pop-art: patlayan renkler, kontrast, sıcak vurgular
+  'Komik': _Gorunum(
+    pozlama: 1.07,
+    egri: 0.4,
+    doygunluk: 1.35,
+    canlilik: 0.4,
+    golge: [0, -2, 10],
+    isik: [10, 7, -6],
+    netlik: 0.15,
+  ),
+  // Mat film: turkuaz gölgeler, kaldırılmış siyahlar, soluk renk, gren
+  'Cool': _Gorunum(
+    egri: 0.35,
+    doygunluk: 0.8,
+    golge: [-5, 5, 14],
+    isik: [8, 5, 0],
+    netlik: 0.15,
+    soluk: 24,
+    tepe: 240,
+    vBaslangic: 0.6,
+    vMiktar: 0.25,
+    gren: 8,
+  ),
+  // Şeker tonu: sıcak vurgular, gölgelerde hafif pembe-mor, yumuşak ışıma
+  'Muzip': _Gorunum(
+    pozlama: 1.03,
+    egri: 0.3,
+    doygunluk: 1.1,
+    canlilik: 0.25,
+    golge: [6, -2, 10],
+    isik: [12, 5, -6],
+    parlama: 0.15,
+    soluk: 6,
+    vBaslangic: 0.65,
+    vMiktar: 0.3,
+  ),
+  // Eski sürümlerden kalan kategori: soluk, serin, hafif vinyet
+  'Düşünceli': _Gorunum(
+    pozlama: 0.97,
+    egri: 0.15,
+    doygunluk: 0.55,
+    golge: [-4, 0, 10],
+    isik: [2, 2, 0],
+    netlik: -0.05,
+    soluk: 12,
+    vBaslangic: 0.6,
+    vMiktar: 0.35,
+    gren: 5,
+  ),
+};
+
 // Her ruh haline uygun görünüm. Tüm hesaplar piksel piksel ve sınırlandırılarak
 // yapılır; böylece koyu bölgeler beyaza, açık bölgeler siyaha "taşmaz".
 imglib.Image efektUygula(imglib.Image im, String kategori) {
-  bool gri = false;
-  double kontrast = 1.0;
-  double doygunluk = 1.0;
-  double parlaklik = 1.0;
-  double dr = 0, dg = 0, db = 0;
-  double vBaslangic = 1.0; // kenar karartmanın başladığı mesafe (0-1)
-  double vMiktar = 0.0; // kenarda ne kadar kararacağı (0-1)
-  double soluk = 0.0; // siyahları kaldırma (mat görünüm), 0-255
+  final gr = gorunumler[kategori];
+  if (gr == null) return im;
+  final w = im.width;
+  final h = im.height;
 
-  switch (kategori) {
-    case 'Karizmatik': // siyah-beyaz, güçlü ama yumuşak kontrast, vinyet
-      gri = true;
-      kontrast = 1.25;
-      vBaslangic = 0.55;
-      vMiktar = 0.45;
-      break;
-    case 'Neşeli': // aydınlık ve sıcak
-      doygunluk = 1.2;
-      kontrast = 1.05;
-      parlaklik = 1.06;
-      dr = 8;
-      db = -6;
-      break;
-    case 'Enerjik': // güçlü kontrast, canlı renkler
-      doygunluk = 1.25;
-      kontrast = 1.2;
-      break;
-    case 'Gizemli': // karanlık, soluk, serin, belirgin vinyet
-      doygunluk = 0.5;
-      kontrast = 1.1;
-      parlaklik = 0.92;
-      dr = -6;
-      db = 8;
-      vBaslangic = 0.45;
-      vMiktar = 0.5;
-      break;
-    case 'Komik': // pop: çok canlı renkler, belirgin kontrast, hafif sıcak
-      doygunluk = 1.45;
-      kontrast = 1.15;
-      parlaklik = 1.05;
-      dr = 6;
-      dg = 4;
-      db = -6;
-      break;
-    case 'Cool': // mat ve serin: kaldırılmış siyahlar, hafif soluk, mavi gölge
-      doygunluk = 0.85;
-      kontrast = 1.08;
-      dr = -6;
-      db = 10;
-      soluk = 22;
-      break;
-    case 'Muzip': // sıcak, hafif canlı, yumuşak vinyet
-      doygunluk = 1.15;
-      kontrast = 1.05;
-      parlaklik = 1.03;
-      dr = 10;
-      dg = 2;
-      db = -6;
-      vBaslangic = 0.65;
-      vMiktar = 0.25;
-      break;
-    case 'Şaşkın': // hafif canlandırma
-      doygunluk = 1.15;
-      kontrast = 1.05;
-      break;
-    case 'Eğlenceli': // canlı ve sıcak
-      doygunluk = 1.35;
-      kontrast = 1.1;
-      parlaklik = 1.04;
-      dr = 6;
-      db = -4;
-      break;
-    case 'Düşünceli': // soluk, serin, hafif vinyet
-      doygunluk = 0.55;
-      kontrast = 0.92;
-      parlaklik = 0.97;
-      dr = -6;
-      db = 8;
-      vBaslangic = 0.6;
-      vMiktar = 0.35;
-      break;
-    case 'Samimi': // sıcak ve yumuşak
-      doygunluk = 1.1;
-      kontrast = 0.95;
-      parlaklik = 1.05;
-      dr = 12;
-      dg = 4;
-      db = -8;
-      break;
-    default:
-      return im;
+  // S-eğrisi tablosu: değer -> eğrilmiş değer
+  final egri = Float64List(256);
+  for (int i = 0; i < 256; i++) {
+    final v = i / 255;
+    final yumusak = v * v * (3 - 2 * v);
+    egri[i] = (v + (yumusak - v) * gr.egri) * 255;
   }
 
-  final cx = im.width / 2;
-  final cy = im.height / 2;
+  // Netlik ve ışıma için görüntünün küçültülüp bulanıklaştırılmış kopyası.
+  // 1/8 ölçekte bulanıklaştırmak tam boyda bulanıklaştırmaktan çok daha hızlıdır.
+  const olcek = 8;
+  Float32List? bulanik;
+  int kw = 0, kh = 0;
+  if (gr.netlik != 0 || gr.parlama > 0) {
+    final kucuk = imglib.copyResize(im,
+        width: math.max(1, w ~/ olcek),
+        height: math.max(1, h ~/ olcek),
+        interpolation: imglib.Interpolation.average);
+    imglib.gaussianBlur(kucuk, radius: 4);
+    kw = kucuk.width;
+    kh = kucuk.height;
+    bulanik = Float32List(kw * kh * 3);
+    int i = 0;
+    for (int y = 0; y < kh; y++) {
+      for (int x = 0; x < kw; x++) {
+        final p = kucuk.getPixel(x, y);
+        bulanik[i++] = p.r.toDouble();
+        bulanik[i++] = p.g.toDouble();
+        bulanik[i++] = p.b.toDouble();
+      }
+    }
+  }
+
+  final cx = w / 2;
+  final cy = h / 2;
   final enUzak = math.sqrt(cx * cx + cy * cy);
+  final aralik = (gr.tepe - gr.soluk) / 255;
+  final br = [0.0, 0.0, 0.0];
 
   for (final p in im) {
-    double r = p.r.toDouble() * parlaklik;
-    double g = p.g.toDouble() * parlaklik;
-    double b = p.b.toDouble() * parlaklik;
+    double r = p.r.toDouble() * gr.pozlama;
+    double g = p.g.toDouble() * gr.pozlama;
+    double b = p.b.toDouble() * gr.pozlama;
 
-    final l = 0.299 * r + 0.587 * g + 0.114 * b;
-    if (gri) {
+    // Bulanık kopyadan bu noktanın değeri (çift doğrusal örnekleme)
+    if (bulanik != null) {
+      final fx = _aralikta((p.x + 0.5) / olcek - 0.5, 0, kw - 1.0);
+      final fy = _aralikta((p.y + 0.5) / olcek - 0.5, 0, kh - 1.0);
+      final x0 = fx.floor();
+      final y0 = fy.floor();
+      final x1 = math.min(x0 + 1, kw - 1);
+      final y1 = math.min(y0 + 1, kh - 1);
+      final ax = fx - x0;
+      final ay = fy - y0;
+      for (int c = 0; c < 3; c++) {
+        final a = bulanik[(y0 * kw + x0) * 3 + c];
+        final bb = bulanik[(y0 * kw + x1) * 3 + c];
+        final cc = bulanik[(y1 * kw + x0) * 3 + c];
+        final d = bulanik[(y1 * kw + x1) * 3 + c];
+        br[c] = (a + (bb - a) * ax) + ((cc + (d - cc) * ax) - (a + (bb - a) * ax)) * ay;
+      }
+    }
+
+    // Netlik: pikselin çevresinden farkını büyüt (+) veya küçült (-)
+    if (gr.netlik != 0) {
+      final l = 0.299 * r + 0.587 * g + 0.114 * b;
+      final bl = (0.299 * br[0] + 0.587 * br[1] + 0.114 * br[2]) * gr.pozlama;
+      // Orta tonlarda tam, çok koyu/çok açıkta azalan etki (hale oluşmasın)
+      final orta = 1 - ((l / 255) * 2 - 1).abs();
+      final fark = (l - bl) * gr.netlik * orta;
+      r += fark;
+      g += fark;
+      b += fark;
+    }
+
+    if (gr.gri) {
+      final l = 0.299 * r + 0.587 * g + 0.114 * b;
       r = l;
       g = l;
       b = l;
-    } else {
-      r = l + (r - l) * doygunluk;
-      g = l + (g - l) * doygunluk;
-      b = l + (b - l) * doygunluk;
     }
 
-    r = (r - 128) * kontrast + 128 + dr;
-    g = (g - 128) * kontrast + 128 + dg;
-    b = (b - 128) * kontrast + 128 + db;
+    // Tonal eğri
+    r = egri[_sinirla(r)];
+    g = egri[_sinirla(g)];
+    b = egri[_sinirla(b)];
 
-    if (soluk > 0) {
-      final f = 1 - soluk / 255;
-      r = soluk + r * f;
-      g = soluk + g * f;
-      b = soluk + b * f;
+    // Doygunluk + canlılık
+    if (!gr.gri) {
+      final l = 0.299 * r + 0.587 * g + 0.114 * b;
+      final enb = math.max(r, math.max(g, b));
+      final enk = math.min(r, math.min(g, b));
+      final doy = enb <= 0 ? 0.0 : (enb - enk) / enb;
+      final k = gr.doygunluk * (1 + gr.canlilik * (1 - doy));
+      r = l + (r - l) * k;
+      g = l + (g - l) * k;
+      b = l + (b - l) * k;
     }
 
-    if (vMiktar > 0) {
+    // Bölünmüş renk tonlama: gölgeler bir renge, parlak bölgeler başka renge
+    final lt = _aralikta((0.299 * r + 0.587 * g + 0.114 * b) / 255, 0, 1);
+    final gA = (1 - lt) * (1 - lt);
+    final iA = lt * lt;
+    r += gr.golge[0] * gA + gr.isik[0] * iA;
+    g += gr.golge[1] * gA + gr.isik[1] * iA;
+    b += gr.golge[2] * gA + gr.isik[2] * iA;
+
+    // Işıma: bulanık kopyanın parlak kısımlarını "ekran" karışımıyla ekle
+    if (gr.parlama > 0) {
+      final bl = (0.299 * br[0] + 0.587 * br[1] + 0.114 * br[2]) / 255;
+      final maske = _aralikta((bl - 0.45) / 0.55, 0, 1) * gr.parlama;
+      r = 255 - (255 - _aralikta(r, 0, 255)) * (1 - br[0] / 255 * maske);
+      g = 255 - (255 - _aralikta(g, 0, 255)) * (1 - br[1] / 255 * maske);
+      b = 255 - (255 - _aralikta(b, 0, 255)) * (1 - br[2] / 255 * maske);
+    }
+
+    // Mat siyahlar ve yumuşatılmış beyazlar
+    if (gr.soluk > 0 || gr.tepe < 255) {
+      r = gr.soluk + _aralikta(r, 0, 255) * aralik;
+      g = gr.soluk + _aralikta(g, 0, 255) * aralik;
+      b = gr.soluk + _aralikta(b, 0, 255) * aralik;
+    }
+
+    if (gr.vMiktar > 0) {
       final dx = p.x - cx;
       final dy = p.y - cy;
       final d = math.sqrt(dx * dx + dy * dy) / enUzak;
-      if (d > vBaslangic) {
-        var t = (d - vBaslangic) / (1 - vBaslangic);
+      if (d > gr.vBaslangic) {
+        var t = (d - gr.vBaslangic) / (1 - gr.vBaslangic);
         if (t > 1) t = 1;
-        final f = 1 - vMiktar * t * t;
+        final f = 1 - gr.vMiktar * t * t;
         r *= f;
         g *= f;
         b *= f;
       }
+    }
+
+    // Film greni: konuma bağlı sabit gürültü, orta tonlarda daha belirgin
+    if (gr.gren > 0) {
+      var hs = (p.x * 73856093) ^ (p.y * 19349663);
+      hs = (hs ^ (hs >> 13)) * 1274126177;
+      hs = hs ^ (hs >> 16);
+      final gurultu = ((hs & 0xFF) / 255 - 0.5) * 2;
+      final orta = 1 - ((lt * 2) - 1).abs() * 0.6;
+      final n = gurultu * gr.gren * orta;
+      r += n;
+      g += n;
+      b += n;
     }
 
     p.r = _sinirla(r);
