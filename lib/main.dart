@@ -104,6 +104,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
   DateTime _sonCekim = DateTime(2000);
   bool _flas = false;
 
+  // Kalibrasyon ayrıntıları (puanlar, ham değerler, etiketler) varsayılan olarak gizli
+  bool _ayrinti = false;
+
   @override
   void initState() {
     super.initState();
@@ -875,8 +878,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
             ),
             Positioned(
               top: 10,
-              left: 8,
-              right: 8,
+              left: 52,
+              right: 52,
               child: Column(
                 children: [
                   Wrap(
@@ -884,19 +887,20 @@ class _KameraEkraniState extends State<KameraEkrani> {
                     spacing: 6,
                     runSpacing: 6,
                     children: [
-                      _rozet('Işık', _isikPuani),
-                      _rozet('Netlik', _netlikPuani),
-                      _rozet('Sabitlik', _sabitlikPuani),
+                      if (_ayrinti) _rozet('Işık', _isikPuani),
+                      if (_ayrinti) _rozet('Netlik', _netlikPuani),
+                      if (_ayrinti) _rozet('Sabitlik', _sabitlikPuani),
                       yuzRozeti,
-                      _rozet('Toplam', _toplamPuan),
+                      if (_ayrinti) _rozet('Toplam', _toplamPuan),
                     ],
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                  if (_yuzSayisi > 0)
+                  if (_ayrinti) const SizedBox(height: 6),
+                  if (_ayrinti)
+                    Text(
+                      'ham: parlaklık ${_hamParlaklik.toStringAsFixed(0)} · netlik ${_hamNetlik.toStringAsFixed(1)} · hareket ${_hamHareket.toStringAsFixed(1)}',
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  if (_ayrinti && _yuzSayisi > 0)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 4),
                       child: Wrap(
@@ -910,7 +914,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
                         ],
                       ),
                     ),
-                  if (_yuzSayisi > 0)
+                  if (_ayrinti && _yuzSayisi > 0)
                     Text(
                       '$_hamYuz\n$katSatiri',
                       textAlign: TextAlign.center,
@@ -923,6 +927,24 @@ class _KameraEkraniState extends State<KameraEkrani> {
                       style: const TextStyle(color: Colors.orangeAccent, fontSize: 11),
                     ),
                 ],
+              ),
+            ),
+            Positioned(
+              top: 8,
+              right: 8,
+              child: GestureDetector(
+                onTap: () => setState(() => _ayrinti = !_ayrinti),
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _ayrinti ? const Color(0xFFF2A33A) : Colors.black54,
+                  ),
+                  child: const Icon(Icons.info_outline,
+                      color: Colors.white, size: 22),
+                ),
               ),
             ),
             if (_sonFoto != null)
