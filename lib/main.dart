@@ -33,7 +33,8 @@ class KameraEkrani extends StatefulWidget {
   State<KameraEkrani> createState() => _KameraEkraniState();
 }
 
-class _KameraEkraniState extends State<KameraEkrani> {
+class _KameraEkraniState extends State<KameraEkrani>
+    with WidgetsBindingObserver {
   CameraController? _kontrol;
   int _kameraIndex = 0;
   String? _sonFoto;
@@ -120,6 +121,19 @@ class _KameraEkraniState extends State<KameraEkrani> {
   // Ara Güler modu: poz değil hayat, insan yaşadığı yerle birlikte, belgesel
   // siyah-beyaz. Kendini "görsel tarihçi" sayan fotoğrafçının yaklaşımı.
   bool _guler = false;
+
+  // Benzer kareleri eleme: aynı sahneden art arda yakalanan karelerden yalnızca
+  // en yüksek puanlısı galeriye gider. Grubun en iyisi bekletilir; sahne
+  // değişince ya da bir süre yeni benzer kare gelmeyince kaydedilir.
+  // 64 bitten en çok bu kadarı farklıysa benzer. Denemede: aynı sahnede 10px
+  // kayma 4, %5 zum 5, 30px kayma 13 bit; farklı sahneler 27 bit ve üstü.
+  static const int benzerlikEsigi = 16;
+  static const Duration grupSuresi = Duration(seconds: 6);
+  _Kare? _bekleyen;
+  int _bekleyenIz = 0;
+  int _bekleyenDonus = 0;
+  Timer? _bekleyenZamanlayici;
+  int _elenen = 0;
   double _egimSapma = 0; // telefonun yataydan sapması (derece)
   StreamSubscription<AccelerometerEvent>? _ivmeAbone;
   // Telefonun dönme hızı (rad/sn, yumuşatılmış). Bulanıklığı yapan şey kameranın
@@ -132,6 +146,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _kameraBaslat(0);
     _ivmeAbone = accelerometerEventStream(
             samplingPeriod: SensorInterval.uiInterval)
@@ -178,6 +193,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
   Future<void> _kameraDegistir() async {
     if (kameralar.length < 2 || _degisiyor || _cekiliyor) return;
     _degisiyor = true;
+    await _bekleyeniKaydet(); // bekleyen karenin dönüşü bu kameraya ait
     final eski = _kontrol;
     setState(() => _kontrol = null);
     try {
@@ -188,8 +204,19 @@ class _KameraEkraniState extends State<KameraEkrani> {
     _degisiyor = false;
   }
 
+  // Uygulama arka plana giderken bekleyen kare kaybolmasın
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState durum) {
+    if (durum == AppLifecycleState.paused ||
+        durum == AppLifecycleState.inactive) {
+      _bekleyeniKaydet();
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _bekleyenZamanlayici?.cancel();
     _kontrol?.dispose();
     _yuzDedektoru.close();
     _pozDedektoru.close();
@@ -975,25 +1002,51 @@ class _KameraEkraniState extends State<KameraEkrani> {
     } catch (_) {}
   }
 
-  // Hafızadaki en yüksek puanlı kareyi JPEG'e çevirip galeriye kaydeder.
+  // Hafızadaki en yüksek puanlı kareyi seçer. Bekleyen kareyle aynı sahneyse
+  // ikisinden iyisi kalır, diğeri elenir; yeni bir sahneyse bekleyen kaydedilir.
   Future<void> _zirveKaydet() async {
     _zirveBaslangic = null;
     _zirvePuan = 0;
     if (_tampon.isEmpty || _kaydediliyor) return;
-    _kaydediliyor = true;
     _sonCekim = DateTime.now();
     var enIyi = _tampon.first;
     for (final k in _tampon) {
       if (k.puan > enIyi.puan) enIyi = k;
     }
     _tampon.clear();
-    setState(() {
-      _cekimSayisi++;
-      _flas = true;
-    });
+    setState(() => _flas = true);
     Future.delayed(const Duration(milliseconds: 150), () {
       if (mounted) setState(() => _flas = false);
     });
+
+    final iz =
+        kareIzi(enIyi.y, enIyi.genislik, enIyi.yukseklik, enIyi.ySatir);
+    final onceki = _bekleyen;
+    if (onceki != null &&
+        hammingMesafesi(iz, _bekleyenIz) <= benzerlikEsigi) {
+      if (enIyi.puan > onceki.puan) {
+        _bekleyen = enIyi;
+        _bekleyenIz = iz;
+      }
+      setState(() => _elenen++);
+    } else {
+      await _bekleyeniKaydet();
+      _bekleyen = enIyi;
+      _bekleyenIz = iz;
+      _bekleyenDonus = kameralar[_kameraIndex].sensorOrientation;
+    }
+    _bekleyenZamanlayici?.cancel();
+    _bekleyenZamanlayici = Timer(grupSuresi, _bekleyeniKaydet);
+  }
+
+  // Bekleyen (grubunun en iyisi olan) kareyi JPEG'e çevirip galeriye kaydeder.
+  Future<void> _bekleyeniKaydet() async {
+    _bekleyenZamanlayici?.cancel();
+    final enIyi = _bekleyen;
+    if (enIyi == null) return;
+    _bekleyen = null;
+    _kaydediliyor = true;
+    if (mounted) setState(() => _cekimSayisi++);
     try {
       final sonuc = await compute(kareyiJpegYap, {
         'y': enIyi.y,
@@ -1004,7 +1057,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
         'ySatir': enIyi.ySatir,
         'uvSatir': enIyi.uvSatir,
         'uvAdim': enIyi.uvAdim,
-        'donus': kameralar[_kameraIndex].sensorOrientation,
+        'donus': _bekleyenDonus,
         'kategori': enIyi.kategori,
       });
       final jpeg = sonuc[0];
@@ -1313,6 +1366,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
               child: _yuvarlakDugme(
                 renk: _otomatik ? Colors.green : Colors.black54,
                 onTap: () => setState(() {
+                  if (_otomatik) _bekleyeniKaydet();
                   _otomatik = !_otomatik;
                   _iyiSayac = 0;
                   _tampon.clear();
@@ -1399,7 +1453,9 @@ class _KameraEkraniState extends State<KameraEkrani> {
                       ),
                     ),
                   Text(
-                    'Çekilen: $_cekimSayisi',
+                    _elenen > 0
+                        ? 'Çekilen: $_cekimSayisi · Benzer elenen: $_elenen'
+                        : 'Çekilen: $_cekimSayisi',
                     style: const TextStyle(color: Colors.white, fontSize: 13),
                   ),
                   if (_zirveBaslangic != null)
@@ -1511,6 +1567,51 @@ class IskeletCizer extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant IskeletCizer eski) => true;
+}
+
+// Karenin parlaklık düzleminden 64 bitlik parmak izi (dHash): 9x8 ızgarada her
+// hücre sağ komşusundan daha parlak mı? Aynı sahnenin kareleri birkaç bit
+// farkla aynı izi verir; pozlama ya da küçük kıpırdanmalar onu pek değiştirmez.
+int kareIzi(Uint8List y, int w, int h, int satir) {
+  final hucre = List<double>.filled(72, 0);
+  final hw = w / 9;
+  final hh = h / 8;
+  for (int r = 0; r < 8; r++) {
+    for (int c = 0; c < 9; c++) {
+      final x0 = (c * hw).floor();
+      final x1 = ((c + 1) * hw).floor();
+      final y0 = (r * hh).floor();
+      final y1 = ((r + 1) * hh).floor();
+      int toplam = 0, adet = 0;
+      for (int yy = y0; yy < y1; yy += 6) {
+        final o = yy * satir;
+        for (int xx = x0; xx < x1; xx += 6) {
+          toplam += y[o + xx];
+          adet++;
+        }
+      }
+      hucre[r * 9 + c] = adet == 0 ? 0.0 : toplam / adet;
+    }
+  }
+  int iz = 0;
+  for (int r = 0; r < 8; r++) {
+    for (int c = 0; c < 8; c++) {
+      iz <<= 1;
+      if (hucre[r * 9 + c] > hucre[r * 9 + c + 1]) iz |= 1;
+    }
+  }
+  return iz;
+}
+
+// İki parmak izi arasında farklı olan bit sayısı (0 = aynı, 64 = tamamen farklı)
+int hammingMesafesi(int a, int b) {
+  var x = a ^ b;
+  int n = 0;
+  while (x != 0) {
+    x &= x - 1;
+    n++;
+  }
+  return n;
 }
 
 // Fotoğrafçı gözünün bir kare için verdiği puanlar ve ipucu
