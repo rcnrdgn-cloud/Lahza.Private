@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:image/image.dart' as imglib;
@@ -231,6 +232,24 @@ class _KameraEkraniState extends State<KameraEkrani>
     super.dispose();
   }
 
+  // Kareyi dik (ekranda görünen) hâle getirmek için gereken dönüş: sensör açısı
+  // ile telefonun o anki dönüşü birlikte (ML Kit'in resmi Flutter örneğindeki
+  // hesap). Yalnızca sensör açısı kullanılırsa yatay tutuşta yüz bulunamaz ve
+  // kaydedilen fotoğraf yan yatık çıkar.
+  int _donus() {
+    final kamera = kameralar[_kameraIndex];
+    const acilar = {
+      DeviceOrientation.portraitUp: 0,
+      DeviceOrientation.landscapeLeft: 90,
+      DeviceOrientation.portraitDown: 180,
+      DeviceOrientation.landscapeRight: 270,
+    };
+    final cihaz = acilar[_kontrol?.value.deviceOrientation] ?? 0;
+    return kamera.lensDirection == CameraLensDirection.front
+        ? (kamera.sensorOrientation + cihaz) % 360
+        : (kamera.sensorOrientation - cihaz + 360) % 360;
+  }
+
   // Kamera karesini (YUV420, 3 düzlem) ML Kit'in istediği NV21 biçimine çevirir.
   Uint8List? _nv21Yap(CameraImage img) {
     if (img.planes.length < 3) return null;
@@ -258,8 +277,7 @@ class _KameraEkraniState extends State<KameraEkrani>
   }
 
   InputImage? _girdiOlustur(CameraImage img) {
-    final rotasyon = InputImageRotationValue.fromRawValue(
-        kameralar[_kameraIndex].sensorOrientation);
+    final rotasyon = InputImageRotationValue.fromRawValue(_donus());
     if (rotasyon == null) return null;
     final veri = _nv21Yap(img);
     if (veri == null) return null;
@@ -437,7 +455,7 @@ class _KameraEkraniState extends State<KameraEkrani>
           teknik.add('Selfie');
         }
         teknik.add(n == 1 ? 'Portre' : (n == 2 ? 'İkili' : 'Grup'));
-        final dikey = kameralar[_kameraIndex].sensorOrientation % 180 != 0;
+        final dikey = _donus() % 180 != 0;
         final kareGenislik = (dikey ? img.height : img.width).toDouble();
         if (a.boundingBox.width / kareGenislik > 0.3) teknik.add('Yakın çekim');
         if (_tamBoy) teknik.add('Tam boy');
@@ -503,7 +521,7 @@ class _KameraEkraniState extends State<KameraEkrani>
     try {
       final pozlar = await _pozDedektoru.processImage(girdi);
       final poz = pozlar.isNotEmpty ? pozlar.first : null;
-      final dikey = kameralar[_kameraIndex].sensorOrientation % 180 != 0;
+      final dikey = _donus() % 180 != 0;
       final boyut = dikey
           ? Size(img.height.toDouble(), img.width.toDouble())
           : Size(img.width.toDouble(), img.height.toDouble());
@@ -750,7 +768,7 @@ class _KameraEkraniState extends State<KameraEkrani>
 
   // Dik (ekranda görünen) görüntüdeki bir noktayı ham sensör karesine çevirir.
   Offset _hamNokta(double u, double v, int w, int h) {
-    switch (kameralar[_kameraIndex].sensorOrientation) {
+    switch (_donus()) {
       case 90:
         return Offset(v, h - 1 - u);
       case 180:
@@ -780,7 +798,7 @@ class _KameraEkraniState extends State<KameraEkrani>
     final hy0 = math.max(0, math.min(p1.dy, p2.dy).floor());
     final hy1 = math.min(h - 2, math.max(p1.dy, p2.dy).ceil());
     // Ekrandaki sol-sağ ayrımı, sensör 90/270° döndüyse ham karede dikey eksendir
-    final dikey = kameralar[_kameraIndex].sensorOrientation % 180 != 0;
+    final dikey = _donus() % 180 != 0;
     final orta = dikey ? (hy0 + hy1) ~/ 2 : (hx0 + hx1) ~/ 2;
     final adim = math.max(2, (hx1 - hx0) ~/ 40);
     int toplam = 0, adet = 0, kenar = 0;
@@ -1040,7 +1058,7 @@ class _KameraEkraniState extends State<KameraEkrani>
       await _bekleyeniKaydet();
       _bekleyen = enIyi;
       _bekleyenIz = iz;
-      _bekleyenDonus = kameralar[_kameraIndex].sensorOrientation;
+      _bekleyenDonus = _donus();
     }
     _bekleyenZamanlayici?.cancel();
     _bekleyenZamanlayici = Timer(grupSuresi, _bekleyeniKaydet);
@@ -1690,7 +1708,34 @@ class _FotoGostericiState extends State<_FotoGosterici> {
                     c == 0 ? 'Son çekim' : '$c çekim önce',
                     style: const TextStyle(color: Colors.white70, fontSize: 13),
                   ),
+                  IconButton(
+                    tooltip: 'Galeride aç',
+                    icon: const Icon(Icons.photo_library_outlined,
+                        color: Colors.white),
+                    onPressed: () => Gal.open(),
+                  ),
                 ],
+              ),
+            ),
+          ),
+          // Bu sürümün telefondaki klasörü (galeri eklentisi Pictures/<albüm>
+          // altına yazar; galeri uygulaması bunu albüm olarak gösterir)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 24,
+            child: Center(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(
+                  'Klasör: Pictures/${cekim[s].etiket == 'Orijinal' ? 'Lahza' : 'Lahza - ${cekim[s].etiket}'}',
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
               ),
             ),
           ),
