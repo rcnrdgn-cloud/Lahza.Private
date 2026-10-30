@@ -1165,6 +1165,8 @@ class _KameraEkraniState extends State<KameraEkrani>
     }
   }
 
+  // Klasör düzeni: orijinaller Pictures/Lahza, kopyalar onun alt klasörlerinde
+  // (Pictures/Lahza/Portra 400, Pictures/Lahza/Neşeli ...).
   // Ruh hali efektli ve film kopyalarını kendi albümlerine yazar, görüntüleyici
   // için sürümlere ekler ve yazılan albümlerin adlarını döndürür.
   Future<List<String>> _kopyalariKaydet(Map<String, dynamic> kopyalar,
@@ -1172,7 +1174,7 @@ class _KameraEkraniState extends State<KameraEkrani>
     final albumler = <String>[];
     final efektli = kopyalar['efektli'];
     if (efektli is Uint8List && kategori != null) {
-      final album = 'Lahza - $kategori';
+      final album = 'Lahza/$kategori';
       await Gal.putImageBytes(efektli, album: album, name: _dosyaAdi(kategori));
       albumler.add(album);
       surumler.add(_Surum(kategori, await _geciciYaz(efektli)));
@@ -1180,7 +1182,7 @@ class _KameraEkraniState extends State<KameraEkrani>
     final film = kopyalar['film'];
     final filmAdi = kopyalar['filmAdi'];
     if (film is Uint8List && filmAdi is String) {
-      final album = 'Lahza - $filmAdi';
+      final album = 'Lahza/$filmAdi';
       await Gal.putImageBytes(film, album: album, name: _dosyaAdi(filmAdi));
       albumler.add(album);
       surumler.add(_Surum(filmAdi, await _geciciYaz(film)));
@@ -1733,7 +1735,7 @@ class _FotoGostericiState extends State<_FotoGosterici> {
                   borderRadius: BorderRadius.circular(14),
                 ),
                 child: Text(
-                  'Klasör: Pictures/${cekim[s].etiket == 'Orijinal' ? 'Lahza' : 'Lahza - ${cekim[s].etiket}'}',
+                  'Klasör: Pictures/Lahza${cekim[s].etiket == 'Orijinal' ? '' : '/${cekim[s].etiket}'}',
                   style: const TextStyle(color: Colors.white70, fontSize: 12),
                 ),
               ),
