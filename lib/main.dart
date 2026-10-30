@@ -106,6 +106,11 @@ class _KameraEkraniState extends State<KameraEkrani>
   DateTime _sonCekim = DateTime(2000);
   bool _flas = false;
 
+  // Bu oturumda çekilenler (en yenisi başta); her çekim orijinal + efektli +
+  // film sürümleri. Sol alttaki küçük resme dokununca görüntüleyicide açılır.
+  final List<List<_Surum>> _cekimler = [];
+  bool _gosteriliyor = false; // görüntüleyici açıkken analiz ve otomatik çekim durur
+
   // Kalibrasyon ayrıntıları (puanlar, ham değerler, etiketler) varsayılan olarak gizli
   bool _ayrinti = false;
 
@@ -593,6 +598,7 @@ class _KameraEkraniState extends State<KameraEkrani>
 
   // Her 5 karede bir ışık, netlik ve sabitlik ölçer; 10 karede bir yüz ve poz arar.
   void _analiz(CameraImage img) {
+    if (_gosteriliyor) return;
     _kareSayaci++;
     if (_kareSayaci % 10 == 0 && !_yuzIsleniyor) {
       _yuzAnaliz(img);
@@ -1063,27 +1069,19 @@ class _KameraEkraniState extends State<KameraEkrani>
         'yuz': enIyi.yuzVar,
       });
       final Uint8List jpeg = sonuc['orijinal'];
-      if (!await Gal.hasAccess()) {
-        await Gal.requestAccess();
-      }
-      // Orijinal her zaman 'Lahza' albümüne, ruh hali efektli kopya kategori
-      // albümüne, film/renk görünümlü kopya o görünümün albümüne
-      await Gal.putImageBytes(jpeg, album: 'Lahza');
-      if (sonuc['efektli'] != null) {
-        await Gal.putImageBytes(sonuc['efektli'],
-            album: 'Lahza - ${enIyi.kategori}');
-      }
-      if (sonuc['film'] != null) {
-        await Gal.putImageBytes(sonuc['film'],
-            album: 'Lahza - ${sonuc['filmAdi']}');
-      }
+      await _galeriIzni();
+      await Gal.putImageBytes(jpeg, album: 'Lahza', name: _dosyaAdi('orijinal'));
+      final surumler = [_Surum('Orijinal', await _geciciYaz(jpeg))];
+      final albumler = [
+        'Lahza',
+        ...await _kopyalariKaydet(sonuc, enIyi.kategori, surumler),
+      ];
       await _arsiveEkle(jpeg, enIyi.etiketler, enIyi.teknik, enIyi.kategori);
-      final dosya = File(
-          '${Directory.systemTemp.path}/lahza_${DateTime.now().millisecondsSinceEpoch}.jpg');
-      await dosya.writeAsBytes(jpeg);
-      if (mounted) setState(() => _sonFoto = dosya.path);
+      _cekimEkle(surumler);
+      _bildir('Kaydedildi: ${albumler.join(' · ')}');
     } catch (e) {
       if (mounted) setState(() => _yuzHata = 'kayıt: $e');
+      _bildir('Kayıt hatası: $e', hata: true);
     } finally {
       _kaydediliyor = false;
     }
@@ -1097,43 +1095,135 @@ class _KameraEkraniState extends State<KameraEkrani>
     final yuzVar = _yuzSayisi > 0;
     final etiketAni = Map<String, int>.from(_kategoriler);
     final teknikAni = List<String>.from(_teknik);
+    XFile? foto;
     try {
       await kontrol.stopImageStream();
-      final foto = await kontrol.takePicture();
+      foto = await kontrol.takePicture();
       _sonCekim = DateTime.now();
       setState(() {
-        _sonFoto = foto.path;
         _cekimSayisi++;
         _flas = true;
       });
       Future.delayed(const Duration(milliseconds: 150), () {
         if (mounted) setState(() => _flas = false);
       });
-      try {
-        if (!await Gal.hasAccess()) {
-          await Gal.requestAccess();
-        }
-        await Gal.putImage(foto.path, album: 'Lahza');
-        await _arsiveEkle(
-            await File(foto.path).readAsBytes(), etiketAni, teknikAni, kategori);
-        final kopyalar = await compute(dosyayaEfektUygula,
-            {'yol': foto.path, 'kategori': kategori, 'yuz': yuzVar});
-        if (kopyalar != null) {
-          if (kopyalar['efektli'] != null) {
-            await Gal.putImageBytes(kopyalar['efektli'],
-                album: 'Lahza - $kategori');
-          }
-          if (kopyalar['film'] != null) {
-            await Gal.putImageBytes(kopyalar['film'],
-                album: 'Lahza - ${kopyalar['filmAdi']}');
-          }
-        }
-      } catch (_) {}
-      _oncekiKare = null;
-      await kontrol.startImageStream(_analiz);
+    } catch (e) {
+      _bildir('Çekim hatası: $e', hata: true);
     } finally {
+      // Analiz hemen devam etsin; kayıt ve kopyalar arka planda sürer
+      _oncekiKare = null;
+      try {
+        await kontrol.startImageStream(_analiz);
+      } catch (_) {}
       _cekiliyor = false;
     }
+    if (foto == null) return;
+
+    final surumler = [_Surum('Orijinal', foto.path)];
+    _cekimEkle(surumler);
+    try {
+      await _galeriIzni();
+      await Gal.putImage(foto.path, album: 'Lahza');
+      await _arsiveEkle(
+          await File(foto.path).readAsBytes(), etiketAni, teknikAni, kategori);
+      final kopyalar = await compute(dosyayaEfektUygula,
+          {'yol': foto.path, 'kategori': kategori, 'yuz': yuzVar});
+      final albumler = [
+        'Lahza',
+        if (kopyalar != null)
+          ...await _kopyalariKaydet(kopyalar, kategori, surumler),
+      ];
+      if (mounted) setState(() {});
+      _bildir('Kaydedildi: ${albumler.join(' · ')}');
+    } catch (e) {
+      if (mounted) setState(() => _yuzHata = 'kayıt: $e');
+      _bildir('Kayıt hatası: $e', hata: true);
+    }
+  }
+
+  Future<void> _galeriIzni() async {
+    if (!await Gal.hasAccess(toAlbum: true)) {
+      await Gal.requestAccess(toAlbum: true);
+    }
+  }
+
+  // Ruh hali efektli ve film kopyalarını kendi albümlerine yazar, görüntüleyici
+  // için sürümlere ekler ve yazılan albümlerin adlarını döndürür.
+  Future<List<String>> _kopyalariKaydet(Map<String, dynamic> kopyalar,
+      String? kategori, List<_Surum> surumler) async {
+    final albumler = <String>[];
+    final efektli = kopyalar['efektli'];
+    if (efektli is Uint8List && kategori != null) {
+      final album = 'Lahza - $kategori';
+      await Gal.putImageBytes(efektli, album: album, name: _dosyaAdi(kategori));
+      albumler.add(album);
+      surumler.add(_Surum(kategori, await _geciciYaz(efektli)));
+    }
+    final film = kopyalar['film'];
+    final filmAdi = kopyalar['filmAdi'];
+    if (film is Uint8List && filmAdi is String) {
+      final album = 'Lahza - $filmAdi';
+      await Gal.putImageBytes(film, album: album, name: _dosyaAdi(filmAdi));
+      albumler.add(album);
+      surumler.add(_Surum(filmAdi, await _geciciYaz(film)));
+    }
+    return albumler;
+  }
+
+  // Galeri dosya adı: zaman damgası + sürüm (Türkçe harfler sadeleştirilir).
+  // Ad verilmezse eklenti her kopyayı "image" adıyla kaydeder.
+  String _dosyaAdi(String surum) {
+    const harf = {'ç': 'c', 'ğ': 'g', 'ı': 'i', 'ö': 'o', 'ş': 's', 'ü': 'u',
+        'Ç': 'C', 'Ğ': 'G', 'İ': 'I', 'Ö': 'O', 'Ş': 'S', 'Ü': 'U'};
+    final sade = surum
+        .split('')
+        .map((c) => harf[c] ?? c)
+        .join()
+        .replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_');
+    return 'lahza_${DateTime.now().millisecondsSinceEpoch}_$sade';
+  }
+
+  Future<String> _geciciYaz(Uint8List veri) async {
+    final dosya = File(
+        '${Directory.systemTemp.path}/lahza_${DateTime.now().microsecondsSinceEpoch}.jpg');
+    await dosya.writeAsBytes(veri);
+    return dosya.path;
+  }
+
+  void _cekimEkle(List<_Surum> surumler) {
+    if (!mounted) return;
+    setState(() {
+      _cekimler.insert(0, surumler);
+      if (_cekimler.length > 30) _cekimler.removeLast();
+      _sonFoto = surumler.first.yol;
+    });
+  }
+
+  // Kaydın sonucunu deklanşörün üstünde kısa bir bildirimle gösterir.
+  void _bildir(String mesaj, {bool hata = false}) {
+    if (!mounted) return;
+    final m = ScaffoldMessenger.of(context);
+    m.hideCurrentSnackBar();
+    m.showSnackBar(SnackBar(
+      content: Text(mesaj),
+      duration: Duration(seconds: hata ? 8 : 3),
+      backgroundColor: hata ? Colors.red.shade800 : Colors.black87,
+      behavior: SnackBarBehavior.floating,
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 200),
+    ));
+  }
+
+  Future<void> _gostericiAc() async {
+    if (_cekimler.isEmpty) return;
+    _gosteriliyor = true;
+    _tampon.clear();
+    _zirveBaslangic = null;
+    _zirvePuan = 0;
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => _FotoGosterici(
+          cekimler: [for (final c in _cekimler) List<_Surum>.from(c)]),
+    ));
+    _gosteriliyor = false;
   }
 
   Widget _rozet(String ad, int puan) {
@@ -1368,10 +1458,13 @@ class _KameraEkraniState extends State<KameraEkrani>
               Positioned(
                 left: 16,
                 bottom: 32,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.file(File(_sonFoto!),
-                      width: 70, height: 70, fit: BoxFit.cover),
+                child: GestureDetector(
+                  onTap: _gostericiAc,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.file(File(_sonFoto!),
+                        width: 70, height: 70, fit: BoxFit.cover),
+                  ),
                 ),
               ),
             Positioned(
@@ -1524,6 +1617,84 @@ class _KameraEkraniState extends State<KameraEkrani>
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// Bir çekimin bir sürümü: etiket (Orijinal, ruh hali ya da film adı) ve dosya
+class _Surum {
+  final String etiket;
+  final String yol;
+  const _Surum(this.etiket, this.yol);
+}
+
+// Son çekimleri ve her çekimin sürümlerini tam ekranda gösterir. Sağa-sola
+// kaydırarak sürümler ve önceki çekimler arasında geçilir; iki parmakla
+// yakınlaştırılır.
+class _FotoGosterici extends StatefulWidget {
+  final List<List<_Surum>> cekimler;
+  const _FotoGosterici({required this.cekimler});
+  @override
+  State<_FotoGosterici> createState() => _FotoGostericiState();
+}
+
+class _FotoGostericiState extends State<_FotoGosterici> {
+  late final List<(int, int)> _sira = [
+    for (int c = 0; c < widget.cekimler.length; c++)
+      for (int s = 0; s < widget.cekimler[c].length; s++) (c, s),
+  ];
+  int _simdiki = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final (c, s) = _sira[_simdiki];
+    final cekim = widget.cekimler[c];
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          PageView.builder(
+            itemCount: _sira.length,
+            onPageChanged: (i) => setState(() => _simdiki = i),
+            itemBuilder: (_, i) {
+              final (ci, si) = _sira[i];
+              return InteractiveViewer(
+                maxScale: 5,
+                child: Center(
+                  child: Image.file(File(widget.cekimler[ci][si].yol),
+                      fit: BoxFit.contain),
+                ),
+              );
+            },
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                  Expanded(
+                    child: Text(
+                      '${cekim[s].etiket}  ·  ${s + 1}/${cekim.length}',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  Text(
+                    c == 0 ? 'Son çekim' : '$c çekim önce',
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

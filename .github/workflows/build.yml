@@ -35,7 +35,7 @@ jobs:
           cp ../icon.png ../icon_fg.png assets/
           cp ../flutter_launcher_icons.yaml .
           dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
-          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <application|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application android:requestLegacyExternalStorage="true"|' android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="lahza"|android:label="Lahzâ"|' android/app/src/main/AndroidManifest.xml
           sed -i 's|signingConfig = signingConfigs.getByName("debug")|signingConfig = signingConfigs.getByName("debug")\n            isMinifyEnabled = false\n            isShrinkResources = false|' android/app/build.gradle.kts
           grep -n "isMinifyEnabled" android/app/build.gradle.kts
