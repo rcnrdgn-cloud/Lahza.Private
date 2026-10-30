@@ -35,7 +35,11 @@ jobs:
           cp ../icon.png ../icon_fg.png assets/
           cp ../flutter_launcher_icons.yaml .
           dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
-          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application android:requestLegacyExternalStorage="true"|' android/app/src/main/AndroidManifest.xml
+          # Albüme kayıt (gal): Android 10 ve altı için yazma izni. Kamera eklentisi
+          # aynı izni maxSdk 28 ile tanımlıyor; tools:replace ile 29 değerimiz geçerli olsun.
+          sed -i 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android"|<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"|' android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" tools:replace="android:maxSdkVersion"/>\n    <application android:requestLegacyExternalStorage="true"|' android/app/src/main/AndroidManifest.xml
+          grep -n "manifest xmlns\|WRITE_EXTERNAL" android/app/src/main/AndroidManifest.xml
           sed -i 's|android:label="lahza"|android:label="Lahzâ"|' android/app/src/main/AndroidManifest.xml
           sed -i 's|signingConfig = signingConfigs.getByName("debug")|signingConfig = signingConfigs.getByName("debug")\n            isMinifyEnabled = false\n            isShrinkResources = false|' android/app/build.gradle.kts
           grep -n "isMinifyEnabled" android/app/build.gradle.kts
