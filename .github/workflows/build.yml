@@ -30,6 +30,7 @@ jobs:
           flutter pub add google_mlkit_face_detection
           flutter pub add google_mlkit_pose_detection
           flutter pub add sensors_plus
+          flutter pub add audioplayers
           flutter pub add dev:flutter_launcher_icons
           mkdir -p assets
           cp ../icon.png ../icon_fg.png assets/

@@ -13,6 +13,7 @@ import 'package:image/image.dart' as imglib;
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:audioplayers/audioplayers.dart';
 
 late List<CameraDescription> kameralar;
 
@@ -169,6 +170,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     final arka = kameralar
         .indexWhere((k) => k.lensDirection == CameraLensDirection.back);
     _kameraBaslat(arka < 0 ? 0 : arka);
+    _sesHazirla();
     _ivmeAbone = accelerometerEventStream(
             samplingPeriod: SensorInterval.uiInterval)
         .listen((e) {
@@ -227,7 +229,31 @@ class _KameraEkraniState extends State<KameraEkrani> {
     _geriSayimZamanlayici?.cancel();
     _ivmeAbone?.cancel();
     _jiroAbone?.cancel();
+    _ses.dispose();
     super.dispose();
+  }
+
+  // Lahza'nın imza sesi her çekimde çalar: uygulamanın çalıştığını ve
+  // fotoğraf çektiğini çevredekiler de duyar. Başka uygulamadaki müziği
+  // kesmez (ses odağı almaz).
+  final AudioPlayer _ses = AudioPlayer();
+  String? _sesDosyasi;
+
+  Future<void> _sesHazirla() async {
+    try {
+      await _ses.setAudioContext(
+          AudioContextConfig(focus: AudioContextConfigFocus.mixWithOthers)
+              .build());
+      final dosya = File('${Directory.systemTemp.path}/lahza_sesi.wav');
+      await dosya.writeAsBytes(lahzaSesi());
+      _sesDosyasi = dosya.path;
+    } catch (_) {}
+  }
+
+  void _sesCal() {
+    final yol = _sesDosyasi;
+    if (yol == null) return;
+    _ses.play(DeviceFileSource(yol)).catchError((_) {});
   }
 
   Future<void> _kameraDegistir() async {
@@ -1148,6 +1174,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     Future.delayed(const Duration(milliseconds: 150), () {
       if (mounted) setState(() => _flas = false);
     });
+    _sesCal();
     _kareyiKaydet(kare, _donus());
   }
 
@@ -1200,6 +1227,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     try {
       await kontrol.stopImageStream();
       foto = await kontrol.takePicture();
+      _sesCal();
       _sonCekim = DateTime.now();
       setState(() {
         _cekimSayisi++;
@@ -2034,6 +2062,72 @@ String? filmSec(imglib.Image im, String? kategori, bool yuzVar) {
   if (ortSicak > 25 && ortL > 120) return 'Gold 200'; // güneşli, sıcak sahne
   if (ortDoy > 0.35) return 'Ektachrome'; // renkli sahne
   return 'Portra 400';
+}
+
+// Lahza'nın imza sesi: iki yumuşak cam tını, beşli aralıkla yükselen
+// (Do6 → Sol6), "işte bu!" hissi. Mekanik deklanşör sesinden bilerek farklı ve
+// çok hafif (en yüksek genlik %22). Ses dosyası taşımamak için 16 bit mono
+// WAV olarak burada üretilir.
+Uint8List lahzaSesi() {
+  const ornek = 44100;
+  const sure = 0.34; // saniye
+  const tepe = 0.22;
+  // frekans (Hz), başlangıç (sn), sönme (sn), genlik
+  const notalar = [
+    [1046.5, 0.0, 0.060, 1.0],
+    [1568.0, 0.070, 0.095, 0.8],
+  ];
+  final n = (ornek * sure).toInt();
+  final ham = Float64List(n);
+  double en = 0;
+  for (int i = 0; i < n; i++) {
+    final t = i / ornek;
+    double v = 0;
+    for (final nota in notalar) {
+      final f = nota[0];
+      final dt = t - nota[1];
+      if (dt < 0) continue;
+      final atak = math.min(1.0, dt / 0.004); // 4 ms yumuşak giriş
+      final zarf = nota[3] * atak * math.exp(-dt / nota[2]);
+      // temel + hafif 2. ve 3. harmonik: cam/çan tınısı
+      v += zarf *
+          (math.sin(2 * math.pi * f * dt) +
+              0.12 * math.sin(2 * math.pi * 2 * f * dt) +
+              0.04 * math.sin(2 * math.pi * 3 * f * dt));
+    }
+    ham[i] = v;
+    if (v.abs() > en) en = v.abs();
+  }
+  final son = (ornek * 0.02).toInt(); // 20 ms yumuşak çıkış, tık olmasın
+  for (int k = 0; k < son; k++) {
+    ham[n - son + k] *= 1 - k / son;
+  }
+
+  final veri = ByteData(44 + n * 2);
+  void etiket(int o, String yazi) {
+    for (int k = 0; k < 4; k++) {
+      veri.setUint8(o + k, yazi.codeUnitAt(k));
+    }
+  }
+
+  etiket(0, 'RIFF');
+  veri.setUint32(4, 36 + n * 2, Endian.little);
+  etiket(8, 'WAVE');
+  etiket(12, 'fmt ');
+  veri.setUint32(16, 16, Endian.little);
+  veri.setUint16(20, 1, Endian.little); // PCM
+  veri.setUint16(22, 1, Endian.little); // mono
+  veri.setUint32(24, ornek, Endian.little);
+  veri.setUint32(28, ornek * 2, Endian.little);
+  veri.setUint16(32, 2, Endian.little);
+  veri.setUint16(34, 16, Endian.little);
+  etiket(36, 'data');
+  veri.setUint32(40, n * 2, Endian.little);
+  for (int i = 0; i < n; i++) {
+    veri.setInt16(44 + i * 2, (ham[i] / en * tepe * 32767).round(),
+        Endian.little);
+  }
+  return veri.buffer.asUint8List();
 }
 
 // Değeri 0-255 aralığına sıkıştırır (taşmayı önler).
