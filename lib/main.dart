@@ -128,6 +128,18 @@ class _KameraEkraniState extends State<KameraEkrani>
   // siyah-beyaz. Kendini "görsel tarihçi" sayan fotoğrafçının yaklaşımı.
   bool _guler = false;
 
+  // Otomatik zoom: elle zoom yok; uygulama yüzün kadrajdaki büyüklüğüne göre
+  // kendisi yaklaşır ve geri açılır.
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  double _zoom = 1.0;
+  double _tabanZoom = 1.0; // normal görüş (1x); ultra geniş açıya inilmez
+  bool _zoomAyarlaniyor = false;
+  int _yuzAnalizNo = 0; // her yüz analizinde artar
+  int _sonZoomAnalizNo = -1; // zoom en son hangi analize göre değişti
+  DateTime _sonYuzZamani = DateTime(2000);
+  static const double zoomUstSinir = 4.0; // daha fazlası dijitalde çok bozulur
+
   // Benzer kareleri eleme: aynı sahneden art arda yakalanan karelerden yalnızca
   // en yüksek puanlısı galeriye gider. Grubun en iyisi bekletilir; sahne
   // değişince ya da bir süre yeni benzer kare gelmeyince kaydedilir.
@@ -176,7 +188,7 @@ class _KameraEkraniState extends State<KameraEkrani>
   Future<void> _kameraBaslat(int index) async {
     final kontrol = CameraController(
       kameralar[index],
-      ResolutionPreset.high,
+      ResolutionPreset.veryHigh, // 1080p: zoomlu karede de yeterli ayrıntı
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
@@ -189,6 +201,14 @@ class _KameraEkraniState extends State<KameraEkrani>
       _yuzSayisi = 0;
       _yuzPuani = null;
       _poz = null;
+      try {
+        _minZoom = await kontrol.getMinZoomLevel();
+        _maxZoom = await kontrol.getMaxZoomLevel();
+      } catch (_) {
+        _minZoom = _maxZoom = 1.0;
+      }
+      _tabanZoom = _aralikta(1.0, _minZoom, _maxZoom);
+      _zoom = _tabanZoom;
       await kontrol.startImageStream(_analiz);
       setState(() {});
     } catch (e) {
@@ -230,6 +250,74 @@ class _KameraEkraniState extends State<KameraEkrani>
     _ivmeAbone?.cancel();
     _jiroAbone?.cancel();
     super.dispose();
+  }
+
+  double _zoomSiniri() => math.min(_maxZoom, zoomUstSinir);
+
+  // Otomatik zoom. Yüz kadrajda küçük kalırsa telefon sabitken ve yüz kadrajın
+  // ortasına yakınken yumuşak adımlarla yaklaşır; yüz kadrajı fazla doldurursa,
+  // kenara taşarsa ya da 2 sn kimse görünmezse yavaşça geri açılır. Ara Güler
+  // modunda, tam boy kadrajda ve kalabalıkta zoom yapılmaz: insan çevresiyle
+  // birlikte görünmeli. Zirve izlenirken ve çekim sırasında zoom değişmez.
+  void _otomatikZoom(int sabit) {
+    final kontrol = _kontrol;
+    if (kontrol == null ||
+        _zoomAyarlaniyor ||
+        _cekiliyor ||
+        _zirveBaslangic != null ||
+        _maxZoom <= _tabanZoom) {
+      return;
+    }
+    final ust = _zoomSiniri();
+    final kutu = _anaYuz;
+    final gw = _dikBoyut.width;
+    final gh = _dikBoyut.height;
+    double hedef = _zoom;
+
+    if (_yuzSayisi == 0 || kutu == null || gw == 0 || gh == 0) {
+      // Kısa kayıplarda bekle; 2 sn kimse yoksa geniş kadraja dön
+      if (DateTime.now().difference(_sonYuzZamani).inMilliseconds < 2000) {
+        return;
+      }
+      hedef = _tabanZoom;
+    } else if (_guler || _tamBoy || _yuzSayisi >= 3) {
+      hedef = _tabanZoom;
+    } else {
+      // Bir önceki zoom adımından sonra yeni bir yüz ölçümü gelmeden karar verme
+      if (_yuzAnalizNo == _sonZoomAnalizNo) return;
+      final gen = kutu.width / gw;
+      final cx = kutu.center.dx / gw;
+      final cy = kutu.center.dy / gh;
+      final kenarda = kutu.left < gw * 0.02 ||
+          kutu.right > gw * 0.98 ||
+          kutu.top < gh * 0.02 ||
+          kutu.bottom > gh * 0.98;
+      if (kenarda || gen > 0.40) {
+        hedef = _zoom / 1.25; // fazla yakın ya da taşıyor: geri aç
+      } else if (gen < 0.12) {
+        // Portre için yüz genişliğin ~%22'si olsun
+        hedef = _zoom * 0.22 / math.max(gen, 0.01);
+        // Yaklaşınca yüz merkezden uzaklaşır; kadrajdan çıkmayacak kadar yaklaş
+        final sapma = math.max((cx - 0.5).abs(), (cy - 0.5).abs());
+        if (sapma > 0.01) hedef = math.min(hedef, _zoom * 0.36 / sapma);
+        // Titreyen elde yaklaşma (zoom titremeyi büyütür)
+        if (sabit < 60) hedef = _zoom;
+      } else {
+        return; // yüz zaten iyi boyutta
+      }
+    }
+
+    hedef = _aralikta(hedef, _tabanZoom, ust);
+    // Yumuşak geçiş: her adımda en fazla %12
+    final adim = _zoom * 0.12;
+    final yeni = _zoom + _aralikta(hedef - _zoom, -adim, adim);
+    if ((yeni - _zoom).abs() < 0.02) return;
+
+    _zoomAyarlaniyor = true;
+    _sonZoomAnalizNo = _yuzAnalizNo;
+    kontrol.setZoomLevel(yeni).then((_) {
+      if (mounted) setState(() => _zoom = yeni);
+    }).catchError((_) {}).whenComplete(() => _zoomAyarlaniyor = false);
   }
 
   // Kareyi dik (ekranda görünen) hâle getirmek için gereken dönüş: sensör açısı
@@ -499,6 +587,8 @@ class _KameraEkraniState extends State<KameraEkrani>
           _hamYuz = ham;
           _teknik = teknik;
           _anaYuz = anaYuz;
+          _yuzAnalizNo++;
+          if (yuzler.isNotEmpty) _sonYuzZamani = DateTime.now();
           _dikBoyut = dikBoyut;
           _grupUyumu = grupUyumu;
           _anaYaw = anaYaw;
@@ -716,6 +806,8 @@ class _KameraEkraniState extends State<KameraEkrani>
         });
       }
 
+      _otomatikZoom(sabit);
+
       // Kareyi puanıyla birlikte hafızaya al (zirve seçimi için)
       final tr = t.round();
       if (_otomatik && img.planes.length >= 3) {
@@ -860,7 +952,8 @@ class _KameraEkraniState extends State<KameraEkrani>
         kutu.right > gw * 0.99 ||
         kutu.bottom > gh * 0.99;
     final basKesik = kutu.top < gh * 0.015 && yuzGen < 0.5;
-    final konuKucuk = !_tamBoy && yuzGen < 0.08;
+    final konuKucuk =
+        !_tamBoy && yuzGen < 0.08 && _zoom >= _zoomSiniri() - 0.05;
     final yamuk = _egimSapma > 2 && _egimSapma < 15;
     if (kenardaKesik) komp -= 45;
     if (basKesik) komp -= 30;
@@ -1585,6 +1678,12 @@ class _KameraEkraniState extends State<KameraEkrani>
                         : 'Çekilen: $_cekimSayisi',
                     style: const TextStyle(color: Colors.white, fontSize: 13),
                   ),
+                  if (_zoom > _tabanZoom + 0.05)
+                    Text(
+                      'Otomatik zoom ${_zoom.toStringAsFixed(1)}×',
+                      style: const TextStyle(
+                          color: Color(0xFFF2A33A), fontSize: 12),
+                    ),
                   if (_zirveBaslangic != null)
                     const Text(
                       '● Zirve izleniyor',
