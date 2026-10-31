@@ -86,16 +86,15 @@ class _KameraEkraniState extends State<KameraEkrani>
   bool _pozIsleniyor = false;
   Pose? _poz;
   Size _resimBoyutu = Size.zero;
-  bool _iskeletGoster = false; // iskelet + el jesti modu
+  // Uygulama tam otomatik: elle açılan iskelet/el jesti modu kaldırıldı.
+  // Kod geliştirme sırasında teşhis için true yapılabilir.
+  static const bool _iskeletGoster = false;
   int _elSayac = 0;
   int _geriSayim = 0;
   Timer? _geriSayimZamanlayici;
 
-  // Otomatik çekim
+  // Otomatik çekim (her zaman açık)
   static const int esik = 75;
-  static const int gerekenArdisik = 3;
-  bool _otomatik = false;
-  int _iyiSayac = 0;
 
   // Zirve yakalama: son ~1.5 saniyenin kareleri hafızada tutulur
   final List<_Kare> _tampon = [];
@@ -113,7 +112,9 @@ class _KameraEkraniState extends State<KameraEkrani>
   bool _gosteriliyor = false; // görüntüleyici açıkken analiz ve otomatik çekim durur
 
   // Kalibrasyon ayrıntıları (puanlar, ham değerler, etiketler) varsayılan olarak gizli
-  bool _ayrinti = false;
+  // Kalibrasyon ayrıntıları kullanıcıya gösterilmez; teşhis için kodda true
+  // yapılabilir (ekranda düğme yok).
+  static const bool _ayrinti = false;
 
   // Fotoğrafçı gözü: kompozisyon, yüzdeki ışık, yüzün netliği, arka plandan
   // ayrışma ve an. Hepsi iyi olduğunda "işte bu" denir.
@@ -126,7 +127,10 @@ class _KameraEkraniState extends State<KameraEkrani>
 
   // Ara Güler modu: poz değil hayat, insan yaşadığı yerle birlikte, belgesel
   // siyah-beyaz. Kendini "görsel tarihçi" sayan fotoğrafçının yaklaşımı.
+  // Ara Güler gözü kendiliğinden devreye girer (bkz. _yuzAnaliz); ani
+  // geçişleri önlemek için birkaç ardışık ölçümle karar verilir.
   bool _guler = false;
+  int _gulerSayac = 0;
 
   // Otomatik zoom: elle zoom yok; uygulama yüzün kadrajdaki büyüklüğüne göre
   // kendisi yaklaşır ve geri açılır.
@@ -165,7 +169,10 @@ class _KameraEkraniState extends State<KameraEkrani>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _kameraBaslat(0);
+    // Arka kamerayla başla (elle kamera değiştirme yok)
+    final arka = kameralar
+        .indexWhere((k) => k.lensDirection == CameraLensDirection.back);
+    _kameraBaslat(arka < 0 ? 0 : arka);
     _ivmeAbone = accelerometerEventStream(
             samplingPeriod: SensorInterval.uiInterval)
         .listen((e) {
@@ -214,20 +221,6 @@ class _KameraEkraniState extends State<KameraEkrani>
     } catch (e) {
       setState(() => _hata = 'Kamera açılamadı: $e');
     }
-  }
-
-  Future<void> _kameraDegistir() async {
-    if (kameralar.length < 2 || _degisiyor || _cekiliyor) return;
-    _degisiyor = true;
-    await _bekleyeniKaydet(); // bekleyen karenin dönüşü bu kameraya ait
-    final eski = _kontrol;
-    setState(() => _kontrol = null);
-    try {
-      await eski?.stopImageStream();
-    } catch (_) {}
-    await eski?.dispose();
-    await _kameraBaslat((_kameraIndex + 1) % kameralar.length);
-    _degisiyor = false;
   }
 
   // Uygulama arka plana giderken bekleyen kare kaybolmasın
@@ -415,6 +408,7 @@ class _KameraEkraniState extends State<KameraEkrani>
       Size dikBoyut = Size.zero;
       int grupUyumu = 100;
       double anaYaw = 0, anaEgim = 0, etkilesim = 0;
+      bool gulerUygun = false;
       if (yuzler.isNotEmpty) {
         final a = yuzler.first;
         final n = yuzler.length;
@@ -548,6 +542,15 @@ class _KameraEkraniState extends State<KameraEkrani>
         if (a.boundingBox.width / kareGenislik > 0.3) teknik.add('Yakın çekim');
         if (_tamBoy) teknik.add('Tam boy');
 
+        // Ara Güler gözü: arka kamerada, insan kameraya değil başka yere
+        // bakıyorsa (fark edilmeden yakalanmış) ve çevresiyle birlikte
+        // görünüyorsa (yüz küçük ya da birden çok kişi) sahne bir hayat anıdır.
+        final onden =
+            kameralar[_kameraIndex].lensDirection == CameraLensDirection.front;
+        final kendiliginden = yaw > 15 || egim < -10;
+        final cevreli = a.boundingBox.width / kareGenislik < 0.2 || n >= 2;
+        gulerUygun = !onden && kendiliginden && cevreli;
+
         anaYuz = a.boundingBox;
         dikBoyut = dikey
             ? Size(img.height.toDouble(), img.width.toDouble())
@@ -594,6 +597,12 @@ class _KameraEkraniState extends State<KameraEkrani>
           _anaYaw = anaYaw;
           _anaEgim = anaEgim;
           _etkilesim = etkilesim;
+          _gulerSayac = (_gulerSayac + (gulerUygun ? 1 : -1)).clamp(0, 6).toInt();
+          if (_gulerSayac >= 4) {
+            _guler = true;
+          } else if (_gulerSayac <= 1) {
+            _guler = false;
+          }
           if (_yuzHata.startsWith('PlatformException')) _yuzHata = '';
         });
       }
@@ -810,7 +819,7 @@ class _KameraEkraniState extends State<KameraEkrani>
 
       // Kareyi puanıyla birlikte hafızaya al (zirve seçimi için)
       final tr = t.round();
-      if (_otomatik && img.planes.length >= 3) {
+      if (img.planes.length >= 3) {
         _tampon.add(_Kare(
           y: Uint8List.fromList(img.planes[0].bytes),
           u: Uint8List.fromList(img.planes[1].bytes),
@@ -830,7 +839,7 @@ class _KameraEkraniState extends State<KameraEkrani>
       }
 
       // Otomatik çekim: eşik aşılınca zirveyi izle, düşüşe geçince en iyi kareyi kaydet
-      if (_otomatik && !_cekiliyor && !_kaydediliyor && _geriSayim == 0) {
+      if (!_cekiliyor && !_kaydediliyor && _geriSayim == 0) {
         final simdi = DateTime.now();
         final bekleme = simdi.difference(_sonCekim).inMilliseconds;
         if (bekleme > 3000) {
@@ -1386,27 +1395,6 @@ class _KameraEkraniState extends State<KameraEkrani>
     );
   }
 
-  Widget _yuvarlakDugme({
-    required Widget icerik,
-    required VoidCallback onTap,
-    Color renk = Colors.black54,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 64,
-        height: 64,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: renk,
-          border: Border.all(color: Colors.white, width: 2),
-        ),
-        child: icerik,
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     if (_hata != null) {
@@ -1549,24 +1537,6 @@ class _KameraEkraniState extends State<KameraEkrani>
                 ],
               ),
             ),
-            Positioned(
-              top: 8,
-              right: 8,
-              child: GestureDetector(
-                onTap: () => setState(() => _ayrinti = !_ayrinti),
-                child: Container(
-                  width: 36,
-                  height: 36,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _ayrinti ? const Color(0xFFF2A33A) : Colors.black54,
-                  ),
-                  child: const Icon(Icons.info_outline,
-                      color: Colors.white, size: 22),
-                ),
-              ),
-            ),
             if (_sonFoto != null)
               Positioned(
                 left: 16,
@@ -1580,70 +1550,6 @@ class _KameraEkraniState extends State<KameraEkrani>
                   ),
                 ),
               ),
-            Positioned(
-              right: 20,
-              bottom: 36,
-              child: _yuvarlakDugme(
-                renk: _otomatik ? Colors.green : Colors.black54,
-                onTap: () => setState(() {
-                  if (_otomatik) _bekleyeniKaydet();
-                  _otomatik = !_otomatik;
-                  _iyiSayac = 0;
-                  _tampon.clear();
-                  _zirveBaslangic = null;
-                  _zirvePuan = 0;
-                }),
-                icerik: Text(
-                  _otomatik ? 'OTO\nAÇIK' : 'OTO\nKAPALI',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
-            if (kameralar.length > 1)
-              Positioned(
-                right: 20,
-                bottom: 112,
-                child: _yuvarlakDugme(
-                  onTap: _kameraDegistir,
-                  icerik: const Icon(Icons.cameraswitch,
-                      color: Colors.white, size: 28),
-                ),
-              ),
-            Positioned(
-              right: 20,
-              bottom: 188,
-              child: _yuvarlakDugme(
-                renk: _iskeletGoster ? Colors.green : Colors.black54,
-                onTap: () => setState(() => _iskeletGoster = !_iskeletGoster),
-                icerik: const Icon(Icons.accessibility_new,
-                    color: Colors.white, size: 28),
-              ),
-            ),
-            Positioned(
-              right: 20,
-              bottom: 264,
-              child: _yuvarlakDugme(
-                renk: _guler ? Colors.green : Colors.black54,
-                onTap: () => setState(() {
-                  _guler = !_guler;
-                  _tampon.clear();
-                  _zirveBaslangic = null;
-                  _zirvePuan = 0;
-                }),
-                icerik: const Text(
-                  'ARA\nGÜLER',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
             Positioned(
               bottom: 110,
               left: 90,
@@ -1689,10 +1595,10 @@ class _KameraEkraniState extends State<KameraEkrani>
                       '● Zirve izleniyor',
                       style: TextStyle(color: Color(0xFFF2A33A), fontSize: 12),
                     ),
-                  if (_iskeletGoster)
+                  if (_guler)
                     const Text(
-                      'Poz modu: elini başının üstüne kaldır, 3 sn sonra çeker',
-                      style: TextStyle(color: Colors.white70, fontSize: 11),
+                      'Ara Güler gözüyle',
+                      style: TextStyle(color: Color(0xFFF2A33A), fontSize: 12),
                     ),
                 ],
               ),
