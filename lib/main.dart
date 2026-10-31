@@ -144,6 +144,15 @@ class _KameraEkraniState extends State<KameraEkrani> {
   DateTime _sonYuzZamani = DateTime(2000);
   static const double zoomUstSinir = 4.0; // daha fazlası dijitalde çok bozulur
 
+  // Aşama 1: odak/pozlama noktası yüzde; pozlama düzeltmesi çekimlerden
+  // öğrenilir ve kamera başına (ön/arka) saklanır.
+  Offset? _olcumNoktasi;
+  DateTime _sonOlcumZamani = DateTime(2000);
+  double _pozDuzeltme = 0; // EV
+  double _minPoz = 0;
+  double _maxPoz = 0;
+  Map<String, dynamic> _ogrenilen = {};
+
   // Benzer kareleri eleme: "işte bu an" denen kare beklemeden kaydedilir; aynı
   // sahnenin sonraki anları (30 sn içinde) son kaydedilenden belirgin biçimde
   // iyi değilse kaydedilmez. 64 bitten en çok bu kadarı farklıysa benzer.
@@ -214,6 +223,18 @@ class _KameraEkraniState extends State<KameraEkrani> {
       }
       _tabanZoom = _aralikta(1.0, _minZoom, _maxZoom);
       _zoom = _tabanZoom;
+      _olcumNoktasi = null;
+      try {
+        _minPoz = await kontrol.getMinExposureOffset();
+        _maxPoz = await kontrol.getMaxExposureOffset();
+        await _ogrenilenYukle();
+        final kayitli = _ogrenilen['poz_${kameralar[index].lensDirection.name}'];
+        _pozDuzeltme = kayitli is num ? kayitli.toDouble() : 0.0;
+        _pozDuzeltme = _aralikta(_pozDuzeltme, _minPoz, _maxPoz);
+        await kontrol.setExposureOffset(_pozDuzeltme);
+      } catch (_) {
+        _minPoz = _maxPoz = 0;
+      }
       await kontrol.startImageStream(_analiz);
       setState(() {});
     } catch (e) {
@@ -269,6 +290,141 @@ class _KameraEkraniState extends State<KameraEkrani> {
     _sonIz = null; // öbür kameranın sahnesi başka
     await _kameraBaslat((_kameraIndex + 1) % kameralar.length);
     _degisiyor = false;
+  }
+
+  // Odak ve pozlama yüze göre: kamera netliği ve ışığı tüm kadraja göre değil,
+  // ana yüzün olduğu noktaya göre ayarlar. Yüz belirgin biçimde yer
+  // değiştirince (en sık 0,7 sn'de bir) güncellenir; 2 sn yüz yoksa sıfırlanır.
+  void _olcumNoktasiGuncelle() {
+    final kontrol = _kontrol;
+    if (kontrol == null || _cekiliyor) return;
+    final simdi = DateTime.now();
+    if (simdi.difference(_sonOlcumZamani).inMilliseconds < 700) return;
+    final kutu = _anaYuz;
+    final gw = _dikBoyut.width;
+    final gh = _dikBoyut.height;
+    Offset? nokta;
+    if (_yuzSayisi > 0 && kutu != null && gw > 0 && gh > 0) {
+      var x = kutu.center.dx / gw;
+      final y = kutu.center.dy / gh;
+      // Ön kamerada önizleme aynalanır; nokta ekrandaki konuma göre verilir
+      if (kameralar[_kameraIndex].lensDirection == CameraLensDirection.front) {
+        x = 1 - x;
+      }
+      nokta = Offset(_aralikta(x, 0, 1), _aralikta(y, 0, 1));
+      final eski = _olcumNoktasi;
+      if (eski != null && (eski - nokta).distance < 0.06) return;
+    } else {
+      if (_olcumNoktasi == null ||
+          simdi.difference(_sonYuzZamani).inMilliseconds < 2000) {
+        return;
+      }
+    }
+    _olcumNoktasi = nokta;
+    _sonOlcumZamani = simdi;
+    if (kontrol.value.focusPointSupported) {
+      kontrol.setFocusPoint(nokta).catchError((_) {});
+    }
+    if (kontrol.value.exposurePointSupported) {
+      kontrol.setExposurePoint(nokta).catchError((_) {});
+    }
+  }
+
+  // Kendi kendini düzelten pozlama: her çekimde yüzün parlaklığı hedefle
+  // karşılaştırılır ve pozlama düzeltmesi azar azar ayarlanır (integral
+  // denetim: hata sıfırlanana kadar birikir). Öğrenilen değer kamera başına
+  // saklanır; uygulama bir dahaki açılışta oradan başlar. Ara Güler modunda
+  // hedef daha koyu (dramatik ışık makbul).
+  void _pozlamadanOgren() {
+    final kontrol = _kontrol;
+    final yl = _degerlendirme.yuzParlaklik;
+    if (kontrol == null || _yuzSayisi == 0 || yl <= 0 || _maxPoz <= _minPoz) {
+      return;
+    }
+    final hedef = _guler ? 110.0 : 128.0;
+    final hata = hedef - yl;
+    if (hata.abs() < 10) return;
+    _pozDuzeltme = _aralikta(_pozDuzeltme + hata / 60 * 0.3,
+        math.max(_minPoz, -1.5), math.min(_maxPoz, 1.5));
+    kontrol.setExposureOffset(_pozDuzeltme).catchError((_) => 0.0);
+    _ogrenilen['poz_${kameralar[_kameraIndex].lensDirection.name}'] =
+        double.parse(_pozDuzeltme.toStringAsFixed(3));
+    _ogrenilenKaydet();
+  }
+
+  Future<Directory> _arsivKlasoru() async {
+    final kok = await getApplicationDocumentsDirectory();
+    final klasor = Directory('${kok.path}/arsiv');
+    if (!await klasor.exists()) await klasor.create(recursive: true);
+    return klasor;
+  }
+
+  Future<void> _ogrenilenYukle() async {
+    try {
+      final f = File('${(await _arsivKlasoru()).path}/ogrenilen.json');
+      if (await f.exists()) {
+        final v = jsonDecode(await f.readAsString());
+        if (v is Map<String, dynamic>) _ogrenilen = v;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _ogrenilenKaydet() async {
+    try {
+      final f = File('${(await _arsivKlasoru()).path}/ogrenilen.json');
+      await f.writeAsString(jsonEncode(_ogrenilen));
+    } catch (_) {}
+  }
+
+  // Aşama 2 — öğrenme verisi: çekim anındaki sahne ve kararlar. Sonradan
+  // hangi sahnede hangi görünümün tutulduğunu öğrenmek için arşive yazılır.
+  Map<String, dynamic> _anOzellikleri(bool otomatik) {
+    final d = _degerlendirme;
+    double k(double v) => double.parse(v.toStringAsFixed(2));
+    return {
+      'otomatik': otomatik,
+      'kamera': kameralar[_kameraIndex].lensDirection.name,
+      'zoom': k(_zoom),
+      'pozDuzeltme': k(_pozDuzeltme),
+      'parlaklik': k(_hamParlaklik),
+      'netlik': k(_hamNetlik),
+      'hareket': k(_hamHareket),
+      'titreme': k(_titreme),
+      'egim': k(_egimSapma),
+      'yuzSayisi': _yuzSayisi,
+      'tamBoy': _tamBoy,
+      'guler': _guler,
+      'baskin': _baskin,
+      'baskinPuan': _baskinPuan,
+      'puan': _toplamPuan,
+      'yuzParlaklik': k(d.yuzParlaklik),
+      'puanlar': {
+        'kompozisyon': d.kompozisyon,
+        'yuzIsigi': d.yuzIsigi,
+        'yuzNetligi': d.yuzNetligi,
+        'ayrisma': d.ayrisma,
+        'an': d.an,
+        'kendiligindenlik': d.kendiligindenlik,
+        'baglam': d.baglam,
+      },
+    };
+  }
+
+  // Görüntüleyicide bir sürüme ne kadar bakıldığı (örtük beğeni sinyali)
+  void _bakisKaydet(String kayit, String surum, int ms) {
+    if (kayit.isEmpty) return;
+    () async {
+      try {
+        final f = File('${(await _arsivKlasoru()).path}/bakislar.jsonl');
+        final satir = jsonEncode({
+          'kayit': kayit,
+          'surum': surum,
+          'ms': ms,
+          'zaman': DateTime.now().toIso8601String(),
+        });
+        await f.writeAsString('$satir\n', mode: FileMode.append);
+      } catch (_) {}
+    }();
   }
 
   double _zoomSiniri() => math.min(_maxZoom, zoomUstSinir);
@@ -842,6 +998,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
       }
 
       _otomatikZoom(sabit);
+      _olcumNoktasiGuncelle();
 
       // Kareyi puanıyla birlikte hafızaya al (zirve seçimi için)
       final tr = t.round();
@@ -997,6 +1154,7 @@ class _KameraEkraniState extends State<KameraEkrani> {
     double an = _baskinPuan * (_yuzSayisi >= 2 ? _grupUyumu / 100 : 1.0);
     if (gozSorun) an *= 0.3;
 
+    d.yuzParlaklik = yl;
     d.ham =
         'yüz ışığı ${yl.toStringAsFixed(0)} · ışık oranı ${oran.toStringAsFixed(2)} · yüz kenar ${yk.toStringAsFixed(1)} · telefon eğimi ${_egimSapma.toStringAsFixed(1)}°';
     if (_guler) {
@@ -1132,20 +1290,27 @@ class _KameraEkraniState extends State<KameraEkrani> {
 
   // Fotoğrafın bir kopyasını ve etiketlerini uygulamanın kendi arşivine yazar
   // (ileride etiketlerle arama yapılabilen arşiv ekranı için).
-  Future<void> _arsiveEkle(Uint8List jpeg, Map<String, int> etiketler,
-      List<String> teknik, String? anaEtiket) async {
+  Future<void> _arsiveEkle(
+      Uint8List jpeg,
+      Map<String, int> etiketler,
+      List<String> teknik,
+      String? anaEtiket,
+      String kayitId,
+      Map<String, dynamic> ozellikler,
+      String? filmAdi) async {
     try {
-      final kok = await getApplicationDocumentsDirectory();
-      final klasor = Directory('${kok.path}/arsiv');
-      if (!await klasor.exists()) await klasor.create(recursive: true);
-      final ad = 'lahza_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      final klasor = await _arsivKlasoru();
+      final ad = '$kayitId.jpg';
       await File('${klasor.path}/$ad').writeAsBytes(jpeg);
       final kayit = jsonEncode({
+        'id': kayitId,
         'dosya': ad,
         'zaman': DateTime.now().toIso8601String(),
         'ana': anaEtiket,
+        'film': filmAdi,
         'etiketler': etiketler,
         'teknik': teknik,
+        'ozellikler': ozellikler,
       });
       await File('${klasor.path}/etiketler.jsonl')
           .writeAsString('$kayit\n', mode: FileMode.append);
@@ -1175,12 +1340,15 @@ class _KameraEkraniState extends State<KameraEkrani> {
       if (mounted) setState(() => _flas = false);
     });
     _sesCal();
-    _kareyiKaydet(kare, _donus());
+    _kareyiKaydet(kare, _donus(), _anOzellikleri(true));
+    _pozlamadanOgren();
   }
 
   // Kareyi JPEG'e çevirip efektli ve film kopyalarıyla galeriye kaydeder.
-  Future<void> _kareyiKaydet(_Kare enIyi, int donus) async {
+  Future<void> _kareyiKaydet(
+      _Kare enIyi, int donus, Map<String, dynamic> ozellikler) async {
     _kaydediliyor = true;
+    final kayitId = 'lahza_${DateTime.now().millisecondsSinceEpoch}';
     if (mounted) setState(() => _cekimSayisi++);
     try {
       final sonuc = await compute(kareyiJpegYap, {
@@ -1199,12 +1367,15 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final Uint8List jpeg = sonuc['orijinal'];
       await _galeriIzni();
       await Gal.putImageBytes(jpeg, album: 'Lahza', name: _dosyaAdi('orijinal'));
-      final surumler = [_Surum('Orijinal', await _geciciYaz(jpeg))];
+      final surumler = [
+        _Surum('Orijinal', await _geciciYaz(jpeg), kayitId),
+      ];
       final albumler = [
         'Lahza',
         ...await _kopyalariKaydet(sonuc, enIyi.kategori, surumler),
       ];
-      await _arsiveEkle(jpeg, enIyi.etiketler, enIyi.teknik, enIyi.kategori);
+      await _arsiveEkle(jpeg, enIyi.etiketler, enIyi.teknik, enIyi.kategori,
+          kayitId, ozellikler, sonuc['filmAdi'] as String?);
       _cekimEkle(surumler);
       _bildir('Kaydedildi: ${albumler.join(' · ')}');
     } catch (e) {
@@ -1223,11 +1394,14 @@ class _KameraEkraniState extends State<KameraEkrani> {
     final yuzVar = _yuzSayisi > 0;
     final etiketAni = Map<String, int>.from(_kategoriler);
     final teknikAni = List<String>.from(_teknik);
+    final ozellikAni = _anOzellikleri(false);
+    final kayitId = 'lahza_${DateTime.now().millisecondsSinceEpoch}';
     XFile? foto;
     try {
       await kontrol.stopImageStream();
       foto = await kontrol.takePicture();
       _sesCal();
+      _pozlamadanOgren();
       _sonCekim = DateTime.now();
       setState(() {
         _cekimSayisi++;
@@ -1248,15 +1422,16 @@ class _KameraEkraniState extends State<KameraEkrani> {
     }
     if (foto == null) return;
 
-    final surumler = [_Surum('Orijinal', foto.path)];
+    final surumler = [_Surum('Orijinal', foto.path, kayitId)];
     _cekimEkle(surumler);
     try {
       await _galeriIzni();
       await Gal.putImage(foto.path, album: 'Lahza');
-      await _arsiveEkle(
-          await File(foto.path).readAsBytes(), etiketAni, teknikAni, kategori);
       final kopyalar = await compute(dosyayaEfektUygula,
           {'yol': foto.path, 'kategori': kategori, 'yuz': yuzVar});
+      await _arsiveEkle(await File(foto.path).readAsBytes(), etiketAni,
+          teknikAni, kategori, kayitId, ozellikAni,
+          kopyalar?['filmAdi'] as String?);
       final albumler = [
         'Lahza',
         if (kopyalar != null)
@@ -1288,7 +1463,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final album = 'Lahza/$kategori';
       await Gal.putImageBytes(efektli, album: album, name: _dosyaAdi(kategori));
       albumler.add(album);
-      surumler.add(_Surum(kategori, await _geciciYaz(efektli)));
+      surumler.add(
+          _Surum(kategori, await _geciciYaz(efektli), surumler.first.kayit));
     }
     final film = kopyalar['film'];
     final filmAdi = kopyalar['filmAdi'];
@@ -1296,7 +1472,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
       final album = 'Lahza/$filmAdi';
       await Gal.putImageBytes(film, album: album, name: _dosyaAdi(filmAdi));
       albumler.add(album);
-      surumler.add(_Surum(filmAdi, await _geciciYaz(film)));
+      surumler.add(
+          _Surum(filmAdi, await _geciciYaz(film), surumler.first.kayit));
     }
     return albumler;
   }
@@ -1352,7 +1529,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
     _zirvePuan = 0;
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => _FotoGosterici(
-          cekimler: [for (final c in _cekimler) List<_Surum>.from(c)]),
+          cekimler: [for (final c in _cekimler) List<_Surum>.from(c)],
+          bakisKaydet: _bakisKaydet),
     ));
     _gosteriliyor = false;
   }
@@ -1676,7 +1854,8 @@ class _KameraEkraniState extends State<KameraEkrani> {
 class _Surum {
   final String etiket;
   final String yol;
-  const _Surum(this.etiket, this.yol);
+  final String kayit; // arşivdeki çekim kimliği (öğrenme verisini bağlar)
+  const _Surum(this.etiket, this.yol, this.kayit);
 }
 
 // Son çekimleri ve her çekimin sürümlerini tam ekranda gösterir. Sağa-sola
@@ -1684,7 +1863,9 @@ class _Surum {
 // yakınlaştırılır.
 class _FotoGosterici extends StatefulWidget {
   final List<List<_Surum>> cekimler;
-  const _FotoGosterici({required this.cekimler});
+  // Her sürüme ne kadar bakıldığını bildirir (kayıt kimliği, sürüm, ms)
+  final void Function(String kayit, String surum, int ms) bakisKaydet;
+  const _FotoGosterici({required this.cekimler, required this.bakisKaydet});
   @override
   State<_FotoGosterici> createState() => _FotoGostericiState();
 }
@@ -1695,6 +1876,23 @@ class _FotoGostericiState extends State<_FotoGosterici> {
       for (int s = 0; s < widget.cekimler[c].length; s++) (c, s),
   ];
   int _simdiki = 0;
+  final Stopwatch _bakis = Stopwatch()..start();
+
+  // O an ekrandaki sürüme bakılan süreyi bildir (0,3 sn altı sayılmaz)
+  void _bakisiBitir() {
+    final ms = _bakis.elapsedMilliseconds;
+    _bakis.reset();
+    if (ms < 300) return;
+    final (c, s) = _sira[_simdiki];
+    final surum = widget.cekimler[c][s];
+    widget.bakisKaydet(surum.kayit, surum.etiket, ms);
+  }
+
+  @override
+  void dispose() {
+    _bakisiBitir();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1706,7 +1904,10 @@ class _FotoGostericiState extends State<_FotoGosterici> {
         children: [
           PageView.builder(
             itemCount: _sira.length,
-            onPageChanged: (i) => setState(() => _simdiki = i),
+            onPageChanged: (i) {
+              _bakisiBitir();
+              setState(() => _simdiki = i);
+            },
             itemBuilder: (_, i) {
               final (ci, si) = _sira[i];
               return InteractiveViewer(
@@ -1888,6 +2089,7 @@ class _Degerlendirme {
   int puan = 0;
   String? ipucu;
   String ham = '';
+  double yuzParlaklik = 0; // yüz bölgesinin ortalama parlaklığı (0-255)
 }
 
 // Kadraja üçler kuralı çizgilerini çok silik olarak çizer.
