@@ -34,8 +34,7 @@ class KameraEkrani extends StatefulWidget {
   State<KameraEkrani> createState() => _KameraEkraniState();
 }
 
-class _KameraEkraniState extends State<KameraEkrani>
-    with WidgetsBindingObserver {
+class _KameraEkraniState extends State<KameraEkrani> {
   CameraController? _kontrol;
   int _kameraIndex = 0;
   String? _sonFoto;
@@ -86,7 +85,7 @@ class _KameraEkraniState extends State<KameraEkrani>
   bool _pozIsleniyor = false;
   Pose? _poz;
   Size _resimBoyutu = Size.zero;
-  // Uygulama tam otomatik: elle açılan iskelet/el jesti modu kaldırıldı.
+  // Uygulama otomatik: elle açılan iskelet/el jesti modu kaldırıldı.
   // Kod geliştirme sırasında teşhis için true yapılabilir.
   static const bool _iskeletGoster = false;
   int _elSayac = 0;
@@ -144,17 +143,15 @@ class _KameraEkraniState extends State<KameraEkrani>
   DateTime _sonYuzZamani = DateTime(2000);
   static const double zoomUstSinir = 4.0; // daha fazlası dijitalde çok bozulur
 
-  // Benzer kareleri eleme: aynı sahneden art arda yakalanan karelerden yalnızca
-  // en yüksek puanlısı galeriye gider. Grubun en iyisi bekletilir; sahne
-  // değişince ya da bir süre yeni benzer kare gelmeyince kaydedilir.
-  // 64 bitten en çok bu kadarı farklıysa benzer. Denemede: aynı sahnede 10px
-  // kayma 4, %5 zum 5, 30px kayma 13 bit; farklı sahneler 27 bit ve üstü.
+  // Benzer kareleri eleme: "işte bu an" denen kare beklemeden kaydedilir; aynı
+  // sahnenin sonraki anları (30 sn içinde) son kaydedilenden belirgin biçimde
+  // iyi değilse kaydedilmez. 64 bitten en çok bu kadarı farklıysa benzer.
+  // Denemede: aynı sahnede 10px kayma 4, %5 zum 5, 30px kayma 13 bit;
+  // farklı sahneler 27 bit ve üstü.
   static const int benzerlikEsigi = 16;
-  static const Duration grupSuresi = Duration(seconds: 6);
-  _Kare? _bekleyen;
-  int _bekleyenIz = 0;
-  int _bekleyenDonus = 0;
-  Timer? _bekleyenZamanlayici;
+  int? _sonIz; // son kaydedilen karenin parmak izi
+  int _sonKayitPuan = 0;
+  DateTime _sonKayitZamani = DateTime(2000);
   int _elenen = 0;
   double _egimSapma = 0; // telefonun yataydan sapması (derece)
   StreamSubscription<AccelerometerEvent>? _ivmeAbone;
@@ -168,8 +165,7 @@ class _KameraEkraniState extends State<KameraEkrani>
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    // Arka kamerayla başla (elle kamera değiştirme yok)
+    // Arka kamerayla başla; ön kameraya düğmeyle geçilir
     final arka = kameralar
         .indexWhere((k) => k.lensDirection == CameraLensDirection.back);
     _kameraBaslat(arka < 0 ? 0 : arka);
@@ -223,19 +219,8 @@ class _KameraEkraniState extends State<KameraEkrani>
     }
   }
 
-  // Uygulama arka plana giderken bekleyen kare kaybolmasın
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState durum) {
-    if (durum == AppLifecycleState.paused ||
-        durum == AppLifecycleState.inactive) {
-      _bekleyeniKaydet();
-    }
-  }
-
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _bekleyenZamanlayici?.cancel();
     _kontrol?.dispose();
     _yuzDedektoru.close();
     _pozDedektoru.close();
@@ -243,6 +228,21 @@ class _KameraEkraniState extends State<KameraEkrani>
     _ivmeAbone?.cancel();
     _jiroAbone?.cancel();
     super.dispose();
+  }
+
+  Future<void> _kameraDegistir() async {
+    if (kameralar.length < 2 || _degisiyor || _cekiliyor) return;
+    _degisiyor = true;
+    final eski = _kontrol;
+    setState(() => _kontrol = null);
+    try {
+      await eski?.stopImageStream();
+    } catch (_) {}
+    await eski?.dispose();
+    _tampon.clear();
+    _sonIz = null; // öbür kameranın sahnesi başka
+    await _kameraBaslat((_kameraIndex + 1) % kameralar.length);
+    _degisiyor = false;
   }
 
   double _zoomSiniri() => math.min(_maxZoom, zoomUstSinir);
@@ -838,20 +838,17 @@ class _KameraEkraniState extends State<KameraEkrani>
         if (_tampon.length > tamponBoyu) _tampon.removeAt(0);
       }
 
-      // Otomatik çekim: eşik aşılınca zirveyi izle, düşüşe geçince en iyi kareyi kaydet
-      if (!_cekiliyor && !_kaydediliyor && _geriSayim == 0) {
-        final simdi = DateTime.now();
-        final bekleme = simdi.difference(_sonCekim).inMilliseconds;
-        if (bekleme > 3000) {
-          if (tr >= esik) {
-            _zirveBaslangic ??= simdi;
-            if (tr > _zirvePuan) _zirvePuan = tr;
-            final sure = simdi.difference(_zirveBaslangic!).inMilliseconds;
-            if (tr <= _zirvePuan - 8 || sure > 1500) _zirveKaydet();
-          } else if (_zirveBaslangic != null) {
-            _zirveKaydet();
-          }
-        }
+      // Otomatik çekim: "işte bu an" kararı verildiği kare beklemeden kaydedilir.
+      // Yüz varsa karar fotoğrafçı gözünündür (ekrandaki ✓ ipucuyla aynı an),
+      // yoksa puan eşiği. Arka arkaya akmasın diye çekimler arası en az 1 sn.
+      if (!_cekiliyor &&
+          _geriSayim == 0 &&
+          _tampon.isNotEmpty &&
+          DateTime.now().difference(_sonCekim).inMilliseconds > 1000) {
+        final an = _yuzSayisi > 0
+            ? (degerlendirme.ipucu?.startsWith('✓') ?? false)
+            : tr >= esik;
+        if (an) _anlikKaydet(_tampon.last);
       }
     } finally {
       _isleniyor = false;
@@ -1129,49 +1126,33 @@ class _KameraEkraniState extends State<KameraEkrani>
     } catch (_) {}
   }
 
-  // Hafızadaki en yüksek puanlı kareyi seçer. Bekleyen kareyle aynı sahneyse
-  // ikisinden iyisi kalır, diğeri elenir; yeni bir sahneyse bekleyen kaydedilir.
-  Future<void> _zirveKaydet() async {
-    _zirveBaslangic = null;
-    _zirvePuan = 0;
-    if (_tampon.isEmpty || _kaydediliyor) return;
+  // "İşte bu an" denen kareyi hemen kaydeder. Son kaydedilenle (30 sn içinde)
+  // aynı sahneyse ve ondan en az 8 puan iyi değilse kaydetmez, elenen sayılır.
+  void _anlikKaydet(_Kare kare) {
     _sonCekim = DateTime.now();
-    var enIyi = _tampon.first;
-    for (final k in _tampon) {
-      if (k.puan > enIyi.puan) enIyi = k;
+    final iz = kareIzi(kare.y, kare.genislik, kare.yukseklik, kare.ySatir);
+    final onceki = _sonIz;
+    final yakinZamanda =
+        _sonCekim.difference(_sonKayitZamani).inSeconds < 30;
+    if (onceki != null &&
+        yakinZamanda &&
+        hammingMesafesi(iz, onceki) <= benzerlikEsigi &&
+        kare.puan < _sonKayitPuan + 8) {
+      setState(() => _elenen++);
+      return;
     }
-    _tampon.clear();
+    _sonIz = iz;
+    _sonKayitPuan = kare.puan;
+    _sonKayitZamani = _sonCekim;
     setState(() => _flas = true);
     Future.delayed(const Duration(milliseconds: 150), () {
       if (mounted) setState(() => _flas = false);
     });
-
-    final iz =
-        kareIzi(enIyi.y, enIyi.genislik, enIyi.yukseklik, enIyi.ySatir);
-    final onceki = _bekleyen;
-    if (onceki != null &&
-        hammingMesafesi(iz, _bekleyenIz) <= benzerlikEsigi) {
-      if (enIyi.puan > onceki.puan) {
-        _bekleyen = enIyi;
-        _bekleyenIz = iz;
-      }
-      setState(() => _elenen++);
-    } else {
-      await _bekleyeniKaydet();
-      _bekleyen = enIyi;
-      _bekleyenIz = iz;
-      _bekleyenDonus = _donus();
-    }
-    _bekleyenZamanlayici?.cancel();
-    _bekleyenZamanlayici = Timer(grupSuresi, _bekleyeniKaydet);
+    _kareyiKaydet(kare, _donus());
   }
 
-  // Bekleyen (grubunun en iyisi olan) kareyi JPEG'e çevirip galeriye kaydeder.
-  Future<void> _bekleyeniKaydet() async {
-    _bekleyenZamanlayici?.cancel();
-    final enIyi = _bekleyen;
-    if (enIyi == null) return;
-    _bekleyen = null;
+  // Kareyi JPEG'e çevirip efektli ve film kopyalarıyla galeriye kaydeder.
+  Future<void> _kareyiKaydet(_Kare enIyi, int donus) async {
     _kaydediliyor = true;
     if (mounted) setState(() => _cekimSayisi++);
     try {
@@ -1184,7 +1165,7 @@ class _KameraEkraniState extends State<KameraEkrani>
         'ySatir': enIyi.ySatir,
         'uvSatir': enIyi.uvSatir,
         'uvAdim': enIyi.uvAdim,
-        'donus': _bekleyenDonus,
+        'donus': donus,
         'kategori': enIyi.kategori,
         'yuz': enIyi.yuzVar,
       });
@@ -1590,11 +1571,6 @@ class _KameraEkraniState extends State<KameraEkrani>
                       style: const TextStyle(
                           color: Color(0xFFF2A33A), fontSize: 12),
                     ),
-                  if (_zirveBaslangic != null)
-                    const Text(
-                      '● Zirve izleniyor',
-                      style: TextStyle(color: Color(0xFFF2A33A), fontSize: 12),
-                    ),
                   if (_guler)
                     const Text(
                       'Ara Güler gözüyle',
@@ -1619,6 +1595,27 @@ class _KameraEkraniState extends State<KameraEkrani>
               Positioned.fill(
                 child: IgnorePointer(
                   child: Container(color: Colors.white70),
+                ),
+              ),
+            // Ön/arka kamera: uygulamadaki tek seçim
+            if (kameralar.length > 1)
+              Positioned(
+                right: 24,
+                bottom: 34,
+                child: GestureDetector(
+                  onTap: _kameraDegistir,
+                  child: Container(
+                    width: 56,
+                    height: 56,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.black54,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                    child: const Icon(Icons.cameraswitch,
+                        color: Colors.white, size: 26),
+                  ),
                 ),
               ),
             Positioned(
